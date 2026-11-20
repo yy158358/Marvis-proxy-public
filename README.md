@@ -1,4 +1,4 @@
-# 马维斯反代（marvis-proxy）
+# Marvis-proxy
 
 把马维斯 App 账号里的对话模型和文生图，包装成本机可用的 **OpenAI / Anthropic 兼容接口**。
 Python 标准库实现，不需要 pip 装任何包，默认只听 `127.0.0.1`。
