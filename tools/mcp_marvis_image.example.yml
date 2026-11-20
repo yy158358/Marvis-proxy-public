@@ -1,0 +1,42 @@
+# Marvis 生图独立工具：挂到 DSH 的配置片段
+#
+# 这是一段「复制即用」的配置：把它追加到
+#   <DSH 配置目录>\cordis.patch.yml
+# 的顶层列表里（和 agent-default-model、tools 那些同级），然后重启 DSH 本体。
+#
+# 挂上之后，模型的工具列表里会出现：
+#   mcp__marvis_image__generate_image
+# 调用它就能直接拿到生成的图片在本机的绝对路径，不用再探测端口、读源码、手搓轮询。
+#
+# ---------------------------------------------------------------- 必读三点
+# 1) toolCallTimeoutMs 默认只有 60000（60 秒）。生图实测 512 档 30~60 秒、
+#    1024 档 60~110 秒，偶发 400 秒级失败。不改一定会被判超时，所以给 600000。
+# 2) serverName 只能是 [A-Za-z0-9_-]{1,32}，所以写 marvis_image（下划线）。
+# 3) cwd 必须是 marvis-proxy 仓库根目录，服务端要读 data/client_keys.txt 里的 key。
+#    路径用正斜杠或双反斜杠，YAML 里别用单个反斜杠。
+
+- id: mcp-marvis-image
+  name: '@deepseek-ai/dsh-mcp-client'
+  config:
+    serverName: marvis_image
+    transport: stdio
+    command: py
+    args: ['-3', 'tools/mcp_image_server.py']
+    cwd: /path/to/marvis-proxy
+    toolCallTimeoutMs: 600000
+    env:
+      MARVIS_PROXY_BASE: http://127.0.0.1:8088
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
+    # 连不上/同步失败时不要拦住宿主启动，只记一条错误（默认就是 false）
+    failOnStartupError: false
+
+# ---------------------------------------------------------------- 可选：调参
+# MARVIS_PROXY_KEY：不设也行，服务端会去 data/client_keys.txt 找第一个非注释行。
+#                   如果代理那边轮换了 key，改那个文件即可，不用动这里。
+# 想换 python 解释器：command 改成绝对路径，例如
+#   command: /path/to/python.exe
+# 想验证工具本身能跑（不经过 DSH）：
+#   cd <本项目目录>
+#   py -3 tools\mcp_image_server.py   然后手工喂一行 JSON：
+#   {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}

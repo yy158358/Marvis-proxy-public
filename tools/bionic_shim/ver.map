@@ -1,0 +1,34 @@
+# 版本脚本：给 shim.c 编出来的垫片 .so 挂上 bionic 风格的可选版本节点。
+#
+# 背景：libqimei.so 是 Android(bionic) 产物，它向 libc 等库请求的符号带着
+#       "LIBC" 版本号。glibc 环境下用这个脚本编出的垫片必须声明同名节点，
+#       链接器才肯把这些符号认下来。
+#
+# 要点：
+#   1. global: *;   —— 所有符号都导出，否则 libqimei 找不到自己要的
+#   2. 节点名必须和 bionic 里的一致（LIBC / LIBC_N / LIBC_O …），不能自己起名
+#   3. 用「父节点 + 空子节点」的写法把历代版本一起声明出来，这样无论客户端
+#      是针对哪个 Android API 级别编的，都能匹配上，无需逐个补
+#   4. 本文件只影响符号的「版本可见性」，不提供任何实现——实现全在 shim.c
+#
+# 注意：这些节点的内容故意为空（没有 local:/global: 具体符号）。
+#       真正的符号由 shim.c 定义，通过 global: *; 一并导出。
+
+LIBC {
+  global: *;
+};
+
+# bionic 历史上发布过的 libc 版本节点（API 21 起）。只声明，不加内容。
+LIBC_N { } LIBC;
+LIBC_O { } LIBC_N;
+LIBC_P { } LIBC_O;
+LIBC_Q { } LIBC_P;
+LIBC_R { } LIBC_Q;
+LIBC_S { } LIBC_R;
+LIBC_T { } LIBC_S;
+LIBC_U { } LIBC_T;
+LIBC_V { } LIBC_U;
+LIBC_W { } LIBC_V;
+LIBC_X { } LIBC_W;
+LIBC_Y { } LIBC_X;
+LIBC_Z { } LIBC_Y;

@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 LvBei
+Copyright (c) 2026 marvis-proxy contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,20 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+NOTE ON THIRD-PARTY COMPONENTS
+
+  * The Android ticket-signing libraries under tools/bionic_shim/ are compiled
+    artifacts distributed for convenience. libqimei_patched.so is derived from
+    the upstream libqimei.so shipped with the Marvis client, with its ELF
+    symbol-version table patched by tools/bionic_shim/patch_versym.py. These
+    files are not covered by the MIT license above; use them subject to your
+    own agreements with the relevant upstream provider.
+
+  * tools/extract_marvis_dll.py copies files that already exist on your own
+    machine into this project directory; it bundles nothing itself.
+
+  * Any device identifiers, keys, or credentials required to run this project
+    are yours and are never distributed by this repository.

@@ -1,0 +1,177 @@
+{
+  "_说明": "name = 对外暴露的 id（一律用上游响应体里的 model 字段）；slot = 上游只认的槽位名；display = 友好显示名（输出到 /v1/models 的 name，DSH 的模型发现会读）；context_window = 上下文长度，按厂商公开规格填写（来源见 05-验证报告 §14）；max_output_tokens = 单次输出上限；reasoning_budget = 推理预算下限（0 表示该模型不产生 reasoning）。 alts = 友好别名（可当 model 传，响应体回显你传的那个名字）。",
+  "aliases": [
+    {
+      "name": "deepseek-v4-1-flash-261017",
+      "slot": "main-auto",
+      "desc": "主档。main-auto 与 deepseek-v4-pro-external 两个槽位都落这个模型",
+      "reasoning_budget": 512,
+      "caps": {
+        "text": true,
+        "image": true,
+        "tools": true,
+        "reasoning": true
+      },
+      "display": "DeepSeek-V4.1-Flash-1017（视觉）",
+      "context_window": 1000000,
+      "max_output_tokens": 32000,
+      "alts": [
+        "deepseek-v4.1-flash",
+        "v4.1-flash",
+        "main-auto"
+      ]
+    },
+    {
+      "name": "deepseek-v4-pro-external",
+      "slot": "deepseek-v4-pro-external",
+      "desc": "防降级路由（和 main-auto 落同一个模型，但不受账号级降级影响）",
+      "reasoning_budget": 512,
+      "caps": {
+        "text": true,
+        "image": true,
+        "tools": true,
+        "reasoning": true
+      },
+      "display": "DeepSeek-V4.1-Flash 防降级（视觉）",
+      "context_window": 1000000,
+      "max_output_tokens": 32000,
+      "alts": [
+        "deepseek-v4.1-flash-antidowngrade",
+        "v4.1-flash-antidowngrade"
+      ]
+    },
+    {
+      "name": "deepseek-v4-flash-202605",
+      "slot": "deepseek-v4-flash-external",
+      "desc": "Flash 档（原 marvis-flash）",
+      "reasoning_budget": 512,
+      "caps": {
+        "text": true,
+        "image": true,
+        "tools": true,
+        "reasoning": true
+      },
+      "display": "DeepSeek-V4-Flash-202605（视觉）",
+      "context_window": 1000000,
+      "max_output_tokens": 32000,
+      "alts": [
+        "deepseek-v4-flash",
+        "v4-flash"
+      ]
+    },
+    {
+      "name": "deepseek-v4-flash-ga-260731",
+      "slot": "hy3-preview-agent",
+      "desc": "HY3 preview agent 档，带 reasoning（原 marvis-hy3）",
+      "reasoning_budget": 512,
+      "caps": {
+        "text": true,
+        "image": false,
+        "tools": true,
+        "reasoning": true
+      },
+      "display": "DeepSeek-V4-Flash-GA-0731（纯文本）",
+      "context_window": 1000000,
+      "max_output_tokens": 32000,
+      "alts": [
+        "deepseek-v4-flash-ga",
+        "v4-flash-ga"
+      ]
+    },
+    {
+      "name": "hy3",
+      "slot": "hy3",
+      "desc": "真 HY3 模型，响应头/响应体都是 hy3，无 reasoning（原 marvis-hy3-native）",
+      "reasoning_budget": 0,
+      "caps": {
+        "text": true,
+        "image": false,
+        "tools": true,
+        "reasoning": false
+      },
+      "display": "HY3（纯文本）",
+      "context_window": 192000,
+      "max_output_tokens": 32000,
+      "alts": [
+        "hy3-native"
+      ]
+    },
+    {
+      "name": "HY-Vision-2.0-instruct",
+      "slot": "hunyuan-turbos-vision",
+      "desc": "视觉档，可吃图（原 marvis-vision）",
+      "reasoning_budget": 64,
+      "caps": {
+        "text": true,
+        "image": true,
+        "tools": false,
+        "reasoning": false
+      },
+      "display": "HY-Vision-2.0（视觉）",
+      "context_window": 44000,
+      "max_output_tokens": 4096,
+      "alts": [
+        "hy-vision-2.0",
+        "hy-vision"
+      ]
+    },
+    {
+      "name": "marvis-vision",
+      "slot": "hunyuan-turbos-vision",
+      "desc": "视觉别名（与 HY-Vision-2.0-instruct 同槽位，名字里带 vision 便于客户端识别）",
+      "reasoning_budget": 64,
+      "caps": {
+        "text": true,
+        "image": true,
+        "tools": false,
+        "reasoning": false
+      },
+      "display": "HY-Vision-2.0（视觉）· marvis-vision 别名",
+      "context_window": 44000,
+      "max_output_tokens": 4096,
+      "alts": [
+        "marvis-vision-alias"
+      ]
+    }
+  ],
+  "claude_aliases": [
+    {
+      "name": "claude-sonnet-4-5",
+      "slot": "main-auto"
+    },
+    {
+      "name": "claude-3-7-sonnet-20250219",
+      "slot": "main-auto"
+    },
+    {
+      "name": "claude-3-5-sonnet-20241022",
+      "slot": "main-auto"
+    },
+    {
+      "name": "claude-3-5-sonnet-20240620",
+      "slot": "main-auto"
+    },
+    {
+      "name": "claude-3-5-haiku-20241022",
+      "slot": "deepseek-v4-flash-external"
+    },
+    {
+      "name": "claude-3-haiku-20240307",
+      "slot": "deepseek-v4-flash-external"
+    },
+    {
+      "name": "claude-opus-4-1-20250805",
+      "slot": "main-auto"
+    }
+  ],
+  "slot_budgets": {
+    "main-auto": 512,
+    "deepseek-v4-pro-external": 512,
+    "deepseek-v4-flash-external": 512,
+    "hy3-preview-agent": 512,
+    "hy3": 0,
+    "hunyuan-turbos-vision": 64,
+    "venus-vision-llm": 0
+  },
+  "reasoning_budget_default": 512
+}

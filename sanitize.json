@@ -1,0 +1,15 @@
+{
+  "_说明": "文本护栏规则（热加载，改完下一次请求生效）。上游对 system 开头的身份声明做拦截，命中即 403 code=4100406。policy 是兜底策略序列，level 越高越激进：0=只跑规则、1=注 U+2060、2=加前缀、3=system 降级为 user。",
+  "policy": ["rewrite", "inject_joiner", "prepend", "degrade"],
+  "rules": [
+    {
+      "id": "ds-agent-powered-by",
+      "scope": "system",
+      "where": "start",
+      "pattern": "(?i)you\\s+are\\s+an?\\s+ai\\s+agent\\s+powered\\s+by\\s+deepseek",
+      "replace": "You are an AI agent served by DeepSeek",
+      "action": "rewrite",
+      "_依据": "实测：动词只有 powered by 被拦（built/created/served/backed 等 13 种全放行）；品牌只有 DeepSeek 系被拦；只匹配 system 开头（偏移 8 以后全放行）"
+    }
+  ]
+}
