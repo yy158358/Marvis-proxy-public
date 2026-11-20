@@ -357,4 +357,4 @@ detail      : {'ctypes': True, 'pure': False, 'node': False, 'local': False}
 
 ## 许可
 
-见 [LICENSE](LICENSE)。本项目不附带任何上游的二进制文件。
+见 [LICENSE](LICENSE)。
