@@ -35,7 +35,7 @@ def load_key(path):
         return env
     p = os.path.join(ROOT, "data", "client_keys.txt")
     if os.path.exists(p):
-        return io.open(p, encoding="utf-8").read().strip()
+        return io.open(p, encoding="utf-8-sig").read().strip()
     return ""
 
 
@@ -205,6 +205,29 @@ def main():
             check("/v1/models 带 provider 块", bool(prov.get("name")), str(prov.get("name")))
         else:
             skip("/v1/models 带 provider 块", "旧进程还没重启，provider 块未生效")
+
+    # ---- 4d) 接线口：能列出 agent，能拒绝越权写入 ----
+    st, body = req("/v1/wire/agents")
+    if st == 404:
+        skip("GET /v1/wire/agents 列出 agent", "旧进程还没重启，wire 路由未生效")
+    else:
+        ids = []
+        try:
+            ids = [a.get("id") for a in (json.loads(body).get("agents") or [])]
+        except Exception:
+            pass
+        check("GET /v1/wire/agents 列出 agent",
+              st == 200 and set(ids) == {"claude-code", "codex", "dsh", "zcode"},
+              "HTTP %d ids=%s" % (st, ids))
+
+    st, body = req("/v1/wire/status")
+    check("GET /v1/wire/status 可读", st == 200, "HTTP %d %s" % (st, body[:80]))
+
+    # 写接口不能匿名可用：它重写的是 ~/.claude、~/.codex 这些文件
+    st, body = req("/v1/wire/apply", "POST", {"model": "___不存在___"}, None)
+    check("POST /v1/wire/apply 无 key 被拒",
+          st in (401, 403),
+          "HTTP %d %s" % (st, body[:100]))
 
     # ---- 5) cleanup 新字段（usage_keep_days 生效的旁证）----
     st, body = req("/admin/cleanup", "POST", {})

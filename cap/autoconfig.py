@@ -136,7 +136,7 @@ def _data_dir(config, ctx):
 
 def _read(path):
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             return f.read().strip()
     except Exception:
         return ""
@@ -323,7 +323,7 @@ def detect_appkey():
             if not os.path.exists(p):
                 continue
             try:
-                with open(p, encoding="utf-8", errors="replace") as f:
+                with open(p, encoding="utf-8-sig", errors="replace") as f:
                     m = _APPKEY_RX.search(f.read())
             except Exception:
                 continue
@@ -368,15 +368,25 @@ def ensure(config, ctx=None):
     result["qimei36"] = q36
 
     # ---- appKey：环境变量 > 缓存 > 探测
+    # 这里要分清「读出来的」和「兜底的」：FALLBACK_APPKEY 是所有人共用的内置值，
+    # 不是探测结果。早年把它当探测结果写进缓存并打印「已自动写入」，用户会以为
+    # 那是针对自己机器测出来的 —— 日后上游换 key，他抱着一个来路不明的缓存排查。
     appkey = (os.environ.get("MARVIS_QIMEI_APPKEY") or "").strip()
     if not appkey:
         cached = _read(os.path.join(base, APPKEY_FILE))
         if cached:
             appkey = cached
+            result["appkey_source"] = "cached"
         else:
             appkey = detect_appkey()
-            if appkey and _write(os.path.join(base, APPKEY_FILE), appkey):
+            if appkey == FALLBACK_APPKEY:
+                # 兜底常量不落盘：写下来只会变成下一次的「缓存」，把来路彻底抹掉。
+                result["appkey_source"] = "builtin"
+            elif appkey and _write(os.path.join(base, APPKEY_FILE), appkey):
                 result["wrote"].append(APPKEY_FILE)
+                result["appkey_source"] = "detected"
+    else:
+        result["appkey_source"] = "env"
     result["appkey"] = appkey
     # 供 cap/uskey.py / tools 读取
     if appkey:

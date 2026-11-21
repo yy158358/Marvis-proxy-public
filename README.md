@@ -1,12 +1,12 @@
-# Marvis-proxy
+# 马维斯反代（marvis-proxy）
 
 把马维斯 App 账号里的对话模型和文生图，包装成本机可用的 **OpenAI / Anthropic 兼容接口**。
 Python 标准库实现，不需要 pip 装任何包，默认只听 `127.0.0.1`。
 
 **同一份代码同时支持 PC 与手机（Android / Termux / PRoot）**。
 
-> **控制台尚未更新。** `console/static/` 目前是空的，Web 界面还没有做，访问 `/` 会返回
-> 404 JSON。现在只能用命令行操作，见下文。
+打开 <http://127.0.0.1:8088/> 就是 Web 控制台：账号池、用量、模型、接线、密钥、路由图都在里面，
+命令行也全部能用
 
 ---
 
@@ -50,8 +50,12 @@ unzip -o /data/local/tmp/m.apk 'lib/arm64-v8a/*' >/dev/null
 
 # 3) 放进一个落在真实文件系统上的目录（不要放 /sdcard）
 mkdir -p ~/.marvis-shim
-cp lib/arm64-v8a/libqimei.so ~/.marvis-shim/libqimei_native.so
+cp lib/arm64-v8a/libqimei.so ~/.marvis-shim/libqimei_patched.so
 ```
+
+> 文件名**必须**是 `libqimei_patched.so`——代码按这个名字去找（`cap/uskey_local.py`）。
+> 在真机 Termux 里它其实没被「打补丁」，只是沿用这个文件名；名字对不上就只会
+> 一直报「缺少 libqimei_patched.so 或 libjni_stub.so」。
 
 然后指定目录启动：
 
@@ -110,6 +114,8 @@ sh run.sh start|bg|stop|status|log|shim|autostart
 | `python tools\qimei36_fetch.py` | 手动取一次设备指纹并缓存 |
 | `python tools\qimei36_fetch.py --log` | 只扫本机客户端数据（不需要 Node.js） |
 | `python tools\admin.py help` | 管理命令行（加号、API Key、账号池），见下 |
+| `python tools\task_tail.py` | 看最近生图任务（`--limit 50 --state failed` 筛失败） |
+| `python tools\wire_selftest.py` | 接线的离线自测：4 个 agent × 各形态配置 → apply → rollback → 逐字节比对 |
 
 Windows 上跑自检如果报 `UnicodeEncodeError`，先 `set PYTHONIOENCODING=utf-8`。
 
@@ -240,6 +246,67 @@ curl http://127.0.0.1:8088/v1/models -H "Authorization: Bearer mvk_..."
 
 > 还没创建任何 key 时，带任意字符串（甚至不带）都能访问，方便先跑起来。
 
+
+---
+
+## 一键接线（把本机 agent 指到本网关）
+
+不用手工改配置文件：`/v1/wire/*` 会替你改好，改之前把原文件存到 `wire-backup/`，
+随时能一键回滚。控制台「接线」页就是这套接口的图形版。
+
+| agent | 改的配置文件 |
+|---|---|
+| Claude Code | `~/.claude/settings.json` |
+| Codex | `~/.codex/config.toml` |
+| DSH | `~/.dsh/profiles/<profile>/cordis.patch.yml` |
+| zcode | 它自己的 `provider_config.json` |
+
+装上哪个改哪个，没装就跳过并在 `not_installed` 里列出来。
+
+```bat
+:: 看装了哪些、现在接没接
+curl -s http://127.0.0.1:8088/v1/wire/agents
+
+:: 接线（写文件）
+curl -s -X POST http://127.0.0.1:8088/v1/wire/apply -H "Content-Type: application/json" ^
+  -d "{\"model\":\"claude-sonnet-4-5\"}"
+
+:: 回滚
+curl -s -X POST http://127.0.0.1:8088/v1/wire/rollback -H "Content-Type: application/json" -d "{}"
+```
+
+三点要知道的：
+
+- **写进配置的 key**：请求体不给 `key` 时，服务端会自己发一把**接入钥匙**（`mkx_` 开头）
+  写进去。它是库里的一把真 key，agent 能直接拿它说话；它不出现在「密钥」页，也不用管，
+  删了下次接线会重新发一把。想指定某一把（比如为了能单独停掉某个工具的对话），
+  在请求体里加 `"key": "mvk_..."`。
+- **多 profile 的 DSH**：机器上有好几个 `~/.dsh/profiles/*` 时会按 `cordis.patch.yml` 的
+  修改时间挑最近的那个，并把选择依据写进返回的 `warnings`。想指定就在请求体里加
+  `"profile": "desktop"`。
+- **改错了**：`/v1/wire/rollback` 按 `wire-backup/` 里的原件逐字节还原，不是「猜着改回去」。
+
+---
+
+## 控制台
+
+`console/static/` 是一个不打包、不构建、没有依赖的静态页（普通 ES module + 一份 CSS），
+浏览器打开 <http://127.0.0.1:8088/> 就是它。
+
+| 页面 | 看什么 |
+|---|---|
+| 概览 | 链路是否健康、池子还剩多少、刚才慢在哪；清理 / 备份 / 续期 / 看原始链路 |
+| 账号池 | 加号、探测、续期、禁用、删除 |
+| 用量 | 请求量、token 构成、延迟分位，按天 / 模型 / 账号切 |
+| 模型 | 客户端真正看到的清单（多个名字落同一槽位是刻意的） |
+| 接线 | 把本机 agent 指到本网关；回滚 |
+| 密钥 | 建 / 停 / 删客户端 key，明文只显示一次 |
+| 路由 | 路由图（此刻会送到谁）+ 请求流水（刚才送到了谁） |
+
+管理令牌存在浏览器 `localStorage` 的 `marvis.admin_token`（侧栏底部可填）。`admin_token`
+为空时服务端本机免鉴权，填不填都能用；一旦设了就要填，否则除 `/health` 和 `/v1/models`
+之外的接口都会 401。
+
 ---
 
 ## 依赖
@@ -267,11 +334,11 @@ config.json           主配置
 models.json           模型映射
 sanitize.json         脱敏规则
 
-api/                  协议翻译 + 管理接口（openai / anthropic / admin / keys）
+api/                  协议翻译 + 管理接口（openai / anthropic / admin / keys / wire）
 core/                 基础设施（pool 账号调度 / store / tasks / backup）
 cap/                  上游协议（chat / image / login / guard / device / wallet /
                       uskey 出票调度 / uskey_local / uskey_pure / autoconfig）
-console/static/       控制台前端（**暂未实现，为空**）
+console/static/       控制台前端（index.html + console.css + 8 个页面模块，不打包不构建）
 tools/                工具集（自检、验收、备份、管理、提取 DLL、取指纹、抓包解析、
                       生图 MCP、bionic_shim 手机出票资产）
 capture/              抓包投放位（故意为空）
@@ -332,7 +399,6 @@ detail      : {'ctypes': True, 'pure': False, 'node': False, 'local': False}
 
 | 现象 | 原因 / 解决 |
 |---|---|
-| 访问 `/` 返回 404 JSON | 正常，控制台还没做，用命令行 |
 | `503 no_account` | 没加号 |
 | `403` + `4100404` | 上游风控。依次查：①`data/qimei36.txt` 是否真实值 ②`run.bat status` 看 `ctypes`/`local` 是否 `True` ③账号是否过期 |
 | `403` + `5104002` | 上游 RPC 依赖失败 |
@@ -357,4 +423,6 @@ detail      : {'ctypes': True, 'pure': False, 'node': False, 'local': False}
 
 ## 许可
 
-见 [LICENSE](LICENSE)。
+见 [LICENSE](LICENSE)。除 `tools/bionic_shim/` 下那几个 Android 垫片库
+（`libc` / `libm` / `libdl` / `libandroid` / `libjni_stub` 是空壳，`libqimei_patched.so`
+是给 glibc 环境用的改写版）之外，本项目不附带上游的二进制文件。

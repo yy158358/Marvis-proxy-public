@@ -77,7 +77,9 @@ CREATE TABLE IF NOT EXISTS client_keys (
   key        TEXT PRIMARY KEY,
   note       TEXT DEFAULT '',
   enabled    INTEGER DEFAULT 1,
-  created_at REAL DEFAULT 0
+  created_at REAL DEFAULT 0,
+  kind       TEXT DEFAULT 'user',
+  plain      TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS sanitize_plan (
@@ -113,7 +115,14 @@ class Store(object):
             "usage": [("reasoning_tokens", "INTEGER DEFAULT 0")],
             "tasks": [("retries", "INTEGER DEFAULT 0"), ("error_kind", "TEXT DEFAULT ''")],
             "client_keys": [("prefix", "TEXT DEFAULT ''"), ("last_used_at", "REAL DEFAULT 0"),
-                            ("uses", "INTEGER DEFAULT 0")],
+                            ("uses", "INTEGER DEFAULT 0"),
+                            # 'user' 普通人建的；'wire' 一键接入自动发的那把（见 api/keys.py）。
+                            # 老库存量行的 kind 是空串，一律按 user 处理。
+                            ("kind", "TEXT DEFAULT 'user'"),
+                            # 只有 kind='wire' 才存明文：这把钥匙每次接线都要写进配置
+                            # 文件，而用户看不到它，所以没法「只显示一次」。普通 key
+                            # 这一列永远是空串，仍然只有 sha256。
+                            ("plain", "TEXT DEFAULT ''")],
             "sanitize_plan": [("rule_ver", "REAL DEFAULT 0")],
         }
         for table, cols in want.items():

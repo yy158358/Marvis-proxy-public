@@ -1,9 +1,9 @@
 // 用官方客户端自带的 qimei_napi.node 取本机真实 QIMEI36（与客户端同源同值）。
 //
-// 逆向依据（详见 15-客户端链路逆向.md）：
+// 取值的模块来自官方客户端安装目录：
 //   <安装目录>\Application\<ver>\win32-native\qimei_napi.node
-//   导出：init / getQ36 / getQ16 / getToken / setReadyCallback / waitReady / shutdown / hardExit
-//   实测签名：init(appKey, appVersion, [dllPath], [guid]) —— 前两个必填
+//   它导出 init / getQ36 / getQ16 / getToken / setReadyCallback / waitReady / shutdown / hardExit
+//   签名：init(appKey, appVersion, [dllPath], [guid]) —— 前两个必填
 //
 // 用法： node tools\qimei36.js [--native-dir <win32-native>] [--app-version 1.60.3400.35] [--guid <32位>]
 "use strict";
@@ -49,9 +49,8 @@ function findAddon() {
 const addonPath = findAddon();
 const nativeDir = path.dirname(addonPath);
 const dllPath = arg("dll", path.join(nativeDir, "qimei.dll"));
-// appKey 是 Marvis 客户端注册的 BEACON/QIMEI 应用标识，不能自行生成。
-// 可用 --app-key 或环境变量 MARVIS_QIMEI_APPKEY 覆盖；
-// 默认值即官方客户端内使用的值。
+// appKey 是 Marvis 客户端注册的应用标识，不能自行生成；
+// 可用 --app-key 或环境变量 MARVIS_QIMEI_APPKEY 覆盖。
 const appKey = arg("app-key", process.env["MARVIS_QIMEI_APPKEY"] || "0WIN06Y06DKV1IUQ");
 const appVersion = arg("app-version", "1.60.3400.35");
 const guid = arg("guid", "");

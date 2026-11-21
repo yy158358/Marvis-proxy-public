@@ -1,18 +1,11 @@
 # -*- coding: utf-8 -*-
 """网关事实：wire 只认这一份，不认命令行参数、不认硬编码。
 
-一个正在跑的反代，比任何静态文档都清楚三件事：
+正在跑的反代比任何静态文档都清楚三件事：自己监听的地址、自己有哪些模型及各自
+的上下文与输出上限、Anthropic 档位该落到哪个槽位。把它们当输入而非常量，用户改
+了 models.json 里的 context_window，下次 apply 写进 Claude Code 的数字就自动跟上。
 
-    1. 自己监听在哪个地址（config.json 的 host:port，可能被 MARVIS_PORT 覆盖过）；
-    2. 自己有哪些模型、每个模型的上下文和输出上限是多少（models.json，mtime 热加载）；
-    3. Anthropic 档位应该落到哪个槽位（api/anthropic.py 的 claude_aliases）。
-
-把这些当成「输入」而不是「常量」，是这套东西和通用工具最大的区别：用户改了
-models.json 里的 context_window，Claude Code 里写进去的数字下次 apply 自动跟上；
-而一个只会念稿的工具永远写 200000。
-
-``provider_block`` 由 serve.py 传入（它需要 ctx 里的账号池），所以这里不 import serve，
-避免循环依赖。
+``provider_block`` 由 serve.py 传入（它要 ctx 里的账号池），所以这里不 import serve。
 """
 from __future__ import annotations
 
@@ -35,7 +28,7 @@ class Model(object):
         self.slot = str(raw.get("slot") or "")
 
     def names(self):
-        """可直接当 ``model`` 传的所有名字（稳定 id 在前，别名在后）。"""
+        """可直接当 ``model`` 传的名字，稳定 id 在前。"""
         return [self.id] + [a for a in self.alts if a != self.id]
 
     def __repr__(self):
@@ -43,7 +36,7 @@ class Model(object):
 
 
 class Facts(object):
-    """一次 apply 用的全部网关事实。构造时快照，apply 期间不变。"""
+    """一次 apply 用的全部网关事实。构造时快照，期间不变。"""
 
     def __init__(self, models, provider=None):
         self.provider = dict(provider or {})
@@ -57,18 +50,18 @@ class Facts(object):
     # ---- 地址 ---------------------------------------------------------
     @property
     def base(self):
-        """不带 /v1 的根地址，例如 http://127.0.0.1:8088。"""
+        """不带 /v1 的根地址。"""
         url = str(self.provider.get("base_url") or "").rstrip("/")
         return url[:-3] if url.endswith("/v1") else url
 
     @property
     def openai_url(self):
-        """OpenAI 形状：http://127.0.0.1:8088/v1"""
+        """OpenAI 形状：``http://127.0.0.1:8088/v1``。"""
         return self.base + "/v1"
 
     @property
     def anthropic_url(self):
-        """Anthropic 形状：不带 /v1 —— Claude Code 自己会在后面拼 /v1/messages。"""
+        """Anthropic 形状：不带 /v1，Claude Code 自己会拼 /v1/messages。"""
         return self.base
 
     @property
@@ -110,11 +103,11 @@ class Facts(object):
         return model
 
     def tier_slot(self, tier):
-        """Claude Code 的档位 -> 槽位名。
+        """档位 -> 槽位名。
 
-        优先用 ``claude_aliases`` 里真实的 Claude 型号前缀（那就是上游已经承认的
-        映射，Claude Code 发过来的请求体 model 字段会落在这张表上）；查不到返回
-        ``None``，调用方保留用户原值并给一条警告 —— 绝不猜。
+        用 ``claude_aliases`` 里真实的 Claude 型号前缀推（那是上游已承认的映射，
+        Claude Code 请求体的 model 字段就落在这张表上）；查不到返回 ``None``，
+        调用方保留原值并告警 —— 绝不猜。
         """
         probes = {
             "opus": ("claude-opus",),
@@ -124,13 +117,12 @@ class Facts(object):
         }.get(tier, ())
         for probe in probes:
             for row in self.claude_aliases:
-                name = str(row.get("name") or "")
-                if name.startswith(probe):
+                if str(row.get("name") or "").startswith(probe):
                     return str(row.get("slot") or "") or None
         return None
 
     def tier_models(self):
-        """档位 -> (真实模型 id, 警告或 None)，缺档的档位不出现在结果里。"""
+        """档位 -> (真实模型 id, 警告)，推不出的档位不出现在结果里。"""
         out = {}
         warnings = []
         for tier in ("opus", "sonnet", "haiku"):

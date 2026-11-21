@@ -3,6 +3,7 @@ data/
 logs/
 backups/
 native/
+wire-backup/
 capture/*
 !capture/README.md
 serve.pid

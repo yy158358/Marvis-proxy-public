@@ -1,23 +1,16 @@
-"""Adapter base: the "apply / restore / drift" contract plus the machinery every
-agent must share.
+# -*- coding: utf-8 -*-
+"""适配器基类：apply / restore / drift 的契约，以及每个 agent 都要共用的机械工作。
 
-An adapter is one small class per agent. It declares
+一个适配器就是一个 agent 的小类，它声明：自己占哪些配置文件、这次要写哪些 *entry*
+（文件 + 键路径 + 原值）、怎么折进文件文本、怎么撤销。
 
-  * which config files it owns,
-  * which *entries* it is about to write (file + key path + original value),
-  * how to fold those entries into the file text,
-  * how to undo them again.
+基类管必须处处一致的部分：
 
-The base class owns the parts that must be identical everywhere:
-
-  * snapshot on FIRST apply only — re-applying a different model never overwrites
-    the recorded originals, so the user can flip models as often as they like and
-    still land back on the state before the first apply,
-  * byte-exact backup of each file before the first write (the rollback path when
-    a rewrite cannot be expressed by the entry list),
-  * atomic writes that keep the file's mode,
-  * drift detection: the file must still be what we last wrote, otherwise the
-    caller has to pass ``force`` before anything is overwritten.
+* 只在**第一次** apply 时建快照 —— 换模型重跑不会覆盖记下的原值，用户怎么来回切都能
+  回到第一次 apply 之前的状态；
+* 首次写之前做逐字节备份（entry 表达不了的重写，靠它兜底回滚）；
+* 原子写，并保留文件权限；
+* 漂移检测：文件必须还是我们上次写的样子，否则要先拿到 ``force`` 才动。
 """
 from __future__ import annotations
 
@@ -37,12 +30,11 @@ from .atomic import (
     newline_of,
     read_bytes,
 )
-from .edit import detect_json_style, json_dump, json_load
 from .snapshot import SnapshotStore, make_entry  # noqa: F401  (re-exported)
 
 
 class DriftError(RuntimeError):
-    """The file changed outside this tool since we last wrote it."""
+    """文件在上次写入之后被外部改过。"""
 
 
 @dataclass
@@ -66,29 +58,27 @@ class RollbackResult:
 
 @dataclass
 class Entry:
-    """One key this adapter writes, with the original value it replaces."""
+    """适配器要写的一个键，连同它替换掉的原值。"""
 
     file: str
     path: list[str]
     present: bool
     value: Any = None
     kind: str = "json"
-    #: optional positional hint (e.g. the TOML table that preceded this one) so a
-    #: rollback can put a section back where the user had it
+    #: 可选的位置提示（例如这张表前面是哪张 TOML 表），回滚时好放回原位
     after: str | None = None
 
 
 class Adapter:
-    """One agent's config wiring."""
+    """单个 agent 的配置接线。"""
 
     agent_id: str = ""
     display_name: str = ""
-    #: config files this adapter owns, relative to the user's home
+    #: 本适配器占的配置文件，相对于用户家目录
     files: tuple[str, ...] = ()
-    #: True when the agent caches its model list / settings at startup
+    #: agent 启动时缓存模型清单/设置，改完必须重启
     needs_restart: bool = False
-    #: True when the agent would read keys from the shell environment first and
-    #: silently shadow everything we write
+    #: agent 会先读 shell 环境里的同名变量，静默压掉我们写的一切
     shadows_env_keys: tuple[str, ...] = ()
 
     def __init__(self, home: Path, gateway_url: str, gateway_key: str, store: SnapshotStore,
@@ -97,11 +87,11 @@ class Adapter:
         self.gateway_url = gateway_url.rstrip("/")
         self.gateway_key = gateway_key
         self.store = store
-        #: 网关事实（地址、模型表、档位映射）。通用工具只能猜，能拿到网关自己那份
-        #: models.json 的调用方应当传进来；为 None 时适配器退回到写死的常量。
+        #: 网关事实（地址、模型表、档位映射）。能拿到网关自己那份 models.json 就传进来；
+        #: 为 None 时适配器退回写死的常量。
         self.facts = facts
 
-    # ---- paths -----------------------------------------------------------
+    # ---- 路径 -----------------------------------------------------------
     def path(self, rel: str) -> Path:
         return self.home / rel
 
@@ -111,10 +101,10 @@ class Adapter:
     def present(self) -> bool:
         return any(p.exists() for p in self.all_paths())
 
-    # ---- text I/O that never normalises the file -------------------------
+    # ---- 绝不规整文件的文本读写 -----------------------------------------
     @staticmethod
     def load_text(path: Path) -> tuple[str, str, bool]:
-        """(text, newline, bom) — the text round-trips byte-exactly."""
+        """(text, newline, bom)，文本能逐字节往返。"""
         data = read_bytes(path)
         if is_utf16(data):
             raise ValueError(f"{path}: UTF-16 config files are not supported (rewrite as UTF-8 first)")
@@ -126,7 +116,7 @@ class Adapter:
 
     @staticmethod
     def load_meta(path: Path) -> dict[str, Any]:
-        """Shape facts a rollback needs but a key list cannot carry."""
+        """回滚需要、但键清单装不下的形态信息。"""
         data = read_bytes(path)
         return {"trailing_newline": data.endswith(b"\n")}
 
@@ -134,30 +124,29 @@ class Adapter:
     def dump_text(text: str, bom: bool) -> bytes:
         return (b"\xef\xbb\xbf" if bom else b"") + encode(text)
 
-    # ---- hooks a subclass implements -------------------------------------
-    #: True when the adapter may add lines to a file that lacked a final newline.
-    #: The inherited default keeps the user's trailing-newline choice intact.
+    # ---- 子类实现的钩子 -------------------------------------------------
+    #: 是否允许往「原本没有结尾换行」的文件里加行；默认保留用户的选择。
     keep_final_newline: bool = True
 
     def plan(self, model: str, effort: str | None) -> list[Entry]:
-        """Every key this apply will write, with the CURRENT values read from disk."""
+        """本次要写的每个键，附带从磁盘读到的当前值。"""
         raise NotImplementedError
 
     def render(self, path: Path, text: str, newline: str, entries: list[Entry], model: str,
                effort: str | None) -> str:
-        """New file text with ``entries`` applied."""
+        """把这些 entry 折进文件后的新文本。"""
         raise NotImplementedError
 
     def unrender(self, path: Path, text: str, newline: str, entries: list[Entry]) -> str:
-        """New file text with ``entries`` restored to their snapshotted values."""
+        """把这些 entry 还原成快照值后的新文本。"""
         raise NotImplementedError
 
     def extra_warnings(self) -> list[str]:
         return []
 
-    # ---- shared orchestration --------------------------------------------
+    # ---- 共用编排 -------------------------------------------------------
     def _backup(self, snap: dict[str, Any], path: Path, data: bytes) -> bool:
-        """Record the pre-first-write state of one file; returns whether it existed."""
+        """记下某文件首次写入前的状态，返回它原本是否存在。"""
         existed = path.exists()
         rec = snap["files"].setdefault(
             str(path), {"existed": existed, "mode": file_mode(path), "hash_original": None,
@@ -181,11 +170,8 @@ class Adapter:
             raise DriftError(
                 f"{path} changed outside this tool since the last write "
                 f"(expected sha256 {expected[:12]}…, found {found[:12]}…). "
-                f"Re-run with --force to overwrite it, or roll back first."
+                f"Pass force=true to overwrite it, or roll back first."
             )
-
-    def ensure_snapshot(self) -> dict[str, Any] | None:
-        return self.store.load(self.agent_id)
 
     def apply(self, model: str, effort: str | None = None, force: bool = False) -> ApplyResult:
         res = ApplyResult(agent=self.agent_id)
@@ -216,7 +202,7 @@ class Adapter:
                 rec["meta"] = self.load_meta(path)
                 if not existed:
                     snap["created_files"].append(str(path))
-                # The originals are recorded ONCE, before the first write.
+                # 原值只在首次写入前记一次。
                 for entry in file_entries:
                     if entry.kind == "own-file":
                         continue  # a whole file we own is restored by its backup
@@ -246,8 +232,7 @@ class Adapter:
             if not existed:
                 res.files_created.append(str(path))
 
-        # Whole files we own (a model catalogue, say) have no keys to splice: they
-        # are rendered from the model we were asked for, and removed on rollback.
+        # 整份归我们的文件（例如模型清单）没有键可接：按请求的模型整体渲染，回滚时删掉。
         for entry in own_files:
             path = Path(entry.file)
             if fresh:
@@ -295,7 +280,7 @@ class Adapter:
         for file_str, rec in snap["files"].items():
             path = Path(file_str)
             if file_str in created and not rec.get("existed"):
-                # The agent had no config before we ran: leave nothing behind.
+                # 我们动手之前这个 agent 没有配置：别留任何东西。
                 if path.exists():
                     path.unlink()
                     res.removed.append(str(path))
@@ -305,7 +290,7 @@ class Adapter:
             own = entries_by_file.get(file_str, [])
             kind_own = rec.get("kind") == "own-file" or any(e.kind == "own-file" for e in own)
             if kind_own:
-                # A file whose whole content is ours: the recorded bytes are the truth.
+                # 整份内容都是我们的：备份里的字节就是真相。
                 if not rec.get("existed"):
                     if path.exists():
                         path.unlink()
@@ -330,7 +315,7 @@ class Adapter:
         res.needs_restart = self.needs_restart
         return res
 
-    # ---- helpers for subclasses ------------------------------------------
+    # ---- 子类小工具 -----------------------------------------------------
     def current(self, path: Path) -> str:
         text, _, _ = self.load_text(path)
         return text
@@ -338,26 +323,16 @@ class Adapter:
     def exists(self, rel: str) -> bool:
         return self.path(rel).exists()
 
-    # ---- nested-key helpers used by every adapter ------------------------
-    def read_json(self, path: Path) -> dict:
-        text, _, _ = self.load_text(path)
-        return json_load(text)
-
-    def write_json(self, path: Path, obj: dict, newline: str) -> str:
-        text, _, _ = self.load_text(path)
-        return json_dump(obj, detect_json_style(text))
-
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
 def _final_newline(text: str, newline: str, meta: dict[str, Any]) -> str:
-    """Match the file's original end-of-file choice.
+    """对齐文件原本的结尾换行。
 
-    A file the user ended without a newline must not grow one just because we added
-    keys, and must not keep one after rollback: that single byte is the whole
-    difference between "restored" and "dirty diff". New files default to a newline.
+    用户没写结尾换行的文件，不能因为我们加了键就长出一个，也不能回滚后留着：这一个
+    字节就是「已还原」和「脏 diff」的全部差别。新文件默认带换行。
     """
     if meta.get("trailing_newline", True):
         return text if text.endswith("\n") else text + newline

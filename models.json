@@ -161,7 +161,15 @@
     },
     {
       "name": "claude-opus-4-1-20250805",
-      "slot": "main-auto"
+      "slot": "deepseek-v4-pro-external"
+    },
+    {
+      "name": "claude-opus-4-5-20251101",
+      "slot": "deepseek-v4-pro-external"
+    },
+    {
+      "name": "claude-fable-5-2",
+      "slot": "deepseek-v4-pro-external"
     }
   ],
   "slot_budgets": {

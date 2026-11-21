@@ -11,6 +11,31 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
 
+def _data_dir():
+    """和 serve.py 同一套规则解析数据目录：``MARVIS_DATA_DIR`` > config.json 的
+    ``data_dir`` > ``data``，相对路径按工程根算。
+
+    以前这里写死 ``data/marvis.db``，跑过 ``MARVIS_DATA_DIR=...`` 的实例再自检，
+    查的是**另一个**库：要么报库不存在，要么更糟 —— 对着空库夸一切正常。
+    """
+    d = (os.environ.get("MARVIS_DATA_DIR") or "").strip()
+    if not d:
+        try:
+            with open(os.path.join(ROOT, "config.json"), encoding="utf-8-sig") as f:
+                d = (json.load(f).get("data_dir") or "").strip()
+        except Exception:
+            d = ""
+    d = d or "data"
+    return d if os.path.isabs(d) else os.path.join(ROOT, d)
+
+
+DATA = _data_dir()
+DB = os.path.join(DATA, "marvis.db")
+FILES = os.path.join(DATA, "files")
+# 日志目录在 serve.py 里是固定的 ROOT/logs（不受 data_dir 影响），这里照抄。
+LOG_PATH = os.path.join(ROOT, "logs", "serve.log")
+
+
 def _arg(flag, default=""):
     if flag in sys.argv:
         i = sys.argv.index(flag)
@@ -23,23 +48,48 @@ BASE = _arg("--base", "http://127.0.0.1:8088").rstrip("/")
 
 
 def _find_key():
+    """取一把可用的 key。
+
+    文件里可以有多行：一行一把，`#` 开头是注释，空行忽略。以前这里直接
+    `.read().strip()` 读整份文件，一旦有人为了记事多写一行注释，整份内容就
+    变成一个两百多字符的「key」，发出去必然 401 —— 而文件本身看着没问题。
+    """
     k = os.environ.get("MARVIS_KEY", "").strip()
     if k:
         return k
-    p = os.path.join(ROOT, "data", "client_keys.txt")
-    if os.path.exists(p):
-        try:
-            return open(p, encoding="utf-8").read().strip()
-        except Exception:
-            return ""
+    p = os.path.join(DATA, "client_keys.txt")
+    if not os.path.exists(p):
+        return ""
+    try:
+        with open(p, encoding="utf-8-sig") as fh:
+            lines = fh.read().splitlines()
+    except Exception:
+        return ""
+    for line in lines:
+        t = line.strip()
+        if not t or t.startswith("#"):
+            continue
+        # 一行里可能写成 "mvk_xxx  # 备注"
+        t = t.split("#", 1)[0].strip()
+        if t:
+            return t
     return ""
 
 
 KEY = _find_key()
 results = []
-def rec(name, ok, detail="", todo=False):
-    """ok: True=PASS / "warn"=WARN / False=FAIL；todo=True 表示跳过，不计入通过。"""
-    tag = "PASS" if ok is True else ("WARN" if ok == "warn" else ("SKIP" if todo else "FAIL"))
+def rec(name, ok, detail="", todo=False, need_key=False):
+    """记账一行。
+    todo=True    环境还没就绪，这轮没法验（SKIP）
+    need_key=True 这条要一把真 key 才能验；没有 key 也是 SKIP，不是失败
+    两者都不算通过也不懂失败，免得新装一份看着满屏红。
+    """
+    if todo or (need_key and not KEY):
+        tag = "SKIP"
+        if need_key and not KEY and "没有可用 key" not in detail:
+            detail = (detail + "  " if detail else "") + "没有可用 key（见 README「自检前先准备 key」）"
+    else:
+        tag = "PASS" if ok is True else ("WARN" if ok == "warn" else "FAIL")
     results.append((tag, name, detail))
     print("%-5s %-46s %s" % (tag, name, detail))
 
@@ -79,9 +129,7 @@ code = ""
 for f in files: code += open(f, encoding="utf-8").read() + "\n"
 used = set(re.findall(r'(?:config|cfg|ctx\["config\"])\.get\(\s*["\']([a-z_0-9]+)["\']', code))
 used |= set(re.findall(r'\[\s*["\']config["\']\s*\]\.get\(\s*["\']([a-z_0-9]+)["\']', code))
-used |= set(re.findall(r'config\.([a-z_0-9]+)\b(?!\s*\()', code)) - {"json", "get", "setdefault", "py"}
-# 注：把 "py" 排除掉是因为文件拼接后会出现 `autoconfig.py` 这种文件名片段，
-# 正则会把 `.py` 误当成「config 的某个属性名」。它绝不是真实的配置键。
+used |= set(re.findall(r'config\.([a-z_0-9]+)\b(?!\s*\()', code)) - {"json", "get", "setdefault", "py", "toml", "yaml", "yml"}
 used |= set(re.findall(r'config\[\s*["\']([a-z_0-9]+)["\']\s*\]', code))
 # 不带 config 变量名、但确实是读配置文件的写法，两种：
 #   json.load(open("config.json")).get("k")   —— 一行写完
@@ -99,7 +147,7 @@ missing = sorted(k for k in used if k not in cfg)
 rec("A2 config 无孤儿键", not orphan, "孤儿: " + ", ".join(orphan) if orphan else "共 %d 键全部被引用" % len(cfg))
 rec("A2b 代码引用的键都在 config.json", not missing, "缺失: " + ", ".join(missing) if missing else "")
 
-# A3 文档：根目录只留 README.md
+# A3 仓库必备文件
 docs = ["README.md", "SECURITY.md", "LICENSE"]
 for d in docs:
     if os.path.exists(d):
@@ -107,20 +155,14 @@ for d in docs:
     else:
         rec("A3 文档 %s" % d, False, "不存在")
 
-# data/ 与 logs/ 由服务首次启动时创建，且都被 .gitignore 排除：
-# 全新 clone 上这里必然是空的。跳过而不是抛异常——否则自检在第一步就崩，
-# 用户根本看不到后面 B 段（接口）的结果。
-_db = os.path.join("data", "marvis.db")
-
 # A4 DB schema
-if not os.path.exists(_db):
-    rec("A4 数据表齐全", True, "跳过：%s 不存在（还没启动过服务，先跑一次 run）" % _db, todo=True)
-else:
-    c = sqlite3.connect(_db); c.row_factory = sqlite3.Row
+if os.path.exists(DB):
+    c = sqlite3.connect(DB); c.row_factory = sqlite3.Row
     tables = {r[0] for r in c.execute("select name from sqlite_master where type='table'")}
     want = {"accounts", "tasks", "usage", "login_pending", "client_keys", "sessions", "sanitize_plan"}
     rec("A4 数据表齐全", want <= tables, "缺: " + ",".join(sorted(want - tables)) if not want <= tables else str(len(tables)) + " 张表")
-    c.close()
+else:
+    rec("A4 数据表齐全", True, "跳过：%s 不存在（还没启动过服务，先跑一次 run）" % DB, todo=True)
 
 # A5 护栏规则文件
 if os.path.exists("sanitize.json"):
@@ -158,13 +200,13 @@ st, _, body, _ = req("/v1/chat/completions", "POST", {"model": "deepseek-v4-1-fl
 rec("B9 无 key → 401", st == 401, "HTTP %d" % st)
 st, _, body, _ = req("/v1/chat/completions", "POST", {"model": "nope", "messages": [{"role": "user", "content": "1"}]},
                      {"X-API-Key": KEY}, timeout=30)
-rec("B10 未知模型 → 404", st == 404, "HTTP %d %s" % (st, body[:60]))
+rec("B10 未知模型 → 404", st == 404, "HTTP %d %s" % (st, body[:60]), need_key=True)
 st, _, body, _ = req("/v1/images/generations", "POST", {"prompt": "x", "size": "1280x1280"}, {"X-API-Key": KEY}, timeout=30)
-rec("B11 1280 尺寸 → 400", st == 400, "HTTP %d %s" % (st, body[:60]))
+rec("B11 1280 尺寸 → 400", st == 400, "HTTP %d %s" % (st, body[:60]), need_key=True)
 st, _, body, _ = req("/v1/images/tasks/img_nonexist", None or "GET", None, {"X-API-Key": KEY}, timeout=30)
-rec("B12 未知任务 → 404", st == 404, "HTTP %d" % st)
+rec("B12 未知任务 → 404", st == 404, "HTTP %d" % st, need_key=True)
 st, _, body, _ = req("/files/../config.json", headers={"X-API-Key": KEY}, timeout=30)
-rec("B13 /files 路径穿越被拦", st in (400, 404), "HTTP %d" % st)
+rec("B13 /files 路径穿越被拦", st in (400, 404), "HTTP %d" % st, need_key=True)
 
 # key 校验覆盖到产物与计数端点（这两处以前是裸的）
 st, _, body, _ = req("/v1/images/tasks/img_nonexist", timeout=30)
@@ -173,24 +215,20 @@ st, _, body, _ = req("/v1/messages/count_tokens", "POST", {"messages": [{"role":
 rec("B16 count_tokens 无 key → 401", st == 401, "HTTP %d" % st)
 st, _, body, _ = req("/v1/messages/count_tokens", "POST",
                      {"messages": [{"role": "user", "content": "1"}]}, {"X-API-Key": KEY}, timeout=30)
-rec("B16b count_tokens 带 key → 200", st == 200, "HTTP %d" % st)
+rec("B16b count_tokens 带 key → 200", st == 200, "HTTP %d" % st, need_key=True)
 st, _, body, _ = req("/files/nonexistent.png", timeout=30)
 rec("B17 /files 无 key → 401", st == 401, "HTTP %d" % st)
 st, _, body, _ = req("/files/nonexistent.png?key=" + KEY, timeout=30)
-rec("B17b /files ?key= → 404（绕过鉴权后正常找不到）", st == 404, "HTTP %d" % st)
+rec("B17b /files ?key= → 404（绕过鉴权后正常找不到）", st == 404, "HTTP %d" % st, need_key=True)
 
 # /files Range（用已有产物）
-# 抑制提示：全新环境里 data/files 往往不存在或为空，这一项无从验证，直接跳过。
-_fdir = os.path.join("data", "files")
-png = [f for f in os.listdir(_fdir) if f.endswith(".png")] if os.path.isdir(_fdir) else []
+_fs = os.listdir(FILES) if os.path.isdir(FILES) else []
+png = [f for f in _fs if f.endswith(".png")]
 if png:
-    size = os.path.getsize(os.path.join(_fdir, png[0]))
+    size = os.path.getsize(os.path.join(FILES, png[0]))
     st, hdrs, body, _ = req("/files/" + png[0], headers={"Range": "bytes=0-99", "X-API-Key": KEY}, timeout=30)
     ok = st == 206 and len(body) == 100 and hdrs.get("Content-Range", "").endswith("/%d" % size)
-    rec("B14 /files Range=bytes=0-99 → 206", ok, "HTTP %d len=%d cr=%s" % (st, len(body), hdrs.get("Content-Range")))
-else:
-    rec("B14 /files Range=bytes=0-99 → 206", True,
-        "跳过：%s 下没有 png（还没生成过图）" % _fdir, todo=True)
+    rec("B14 /files Range=bytes=0-99 → 206", ok, "HTTP %d len=%d cr=%s" % (st, len(body), hdrs.get("Content-Range")), need_key=True)
 
 print()
 print("=" * 78)
@@ -205,14 +243,14 @@ try:
     mv = d.get("_marvis") or {}
 except Exception:
     txt, mv = "", {}
-rec("C1 非流式对话", ok, "HTTP %d %r account=%s" % (st, txt[:12], mv.get("account")))
+rec("C1 非流式对话", ok, "HTTP %d %r account=%s" % (st, txt[:12], mv.get("account")), need_key=True)
 
 st, hdrs, body, ms = req("/v1/chat/completions", "POST",
     {"model": "deepseek-v4-1-flash-261017", "messages": [{"role": "user", "content": "回两个字"}],
      "max_tokens": 512, "stream": True}, CK)
 sse = body.decode("utf-8", "replace")
 rec("C2 流式对话", st == 200 and "text/event-stream" in hdrs.get("Content-Type", ""),
-    "HTTP %d ctype=%s blocks=%d" % (st, hdrs.get("Content-Type"), sse.count("data:")))
+    "HTTP %d ctype=%s blocks=%d" % (st, hdrs.get("Content-Type"), sse.count("data:")), need_key=True)
 
 tools = [{"type": "function", "function": {"name": "get_weather", "description": "查天气",
           "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}]
@@ -225,7 +263,7 @@ try:
 except Exception:
     fr, tc = None, None
 rec("C3 tools 调用", st == 200 and fr == "tool_calls" and bool(tc),
-    "HTTP %d finish=%s name=%s" % (st, fr, (tc[0]["function"]["name"] if tc else None)))
+    "HTTP %d finish=%s name=%s" % (st, fr, (tc[0]["function"]["name"] if tc else None)), need_key=True)
 
 st, _, body, _ = req("/v1/messages", "POST",
     {"model": "claude-3-5-sonnet-20241022", "max_tokens": 512,
@@ -234,65 +272,81 @@ try:
     d = json.loads(body); stop = d.get("stop_reason"); typ = d.get("type")
 except Exception:
     stop, typ = None, None
-rec("C4 Anthropic /v1/messages", st == 200 and typ == "message", "HTTP %d type=%s stop=%s" % (st, typ, stop))
+rec("C4 Anthropic /v1/messages", st == 200 and typ == "message", "HTTP %d type=%s stop=%s" % (st, typ, stop), need_key=True)
 
 st, _, body, _ = req("/v1/images/generations", "POST", {"prompt": "一个红色圆形", "size": "512x512"}, CK, timeout=40)
 try:
     d = json.loads(body); tid = d.get("id"); tst = d.get("status")
 except Exception:
     tid, tst = None, None
-rec("C5 生图提交（异步）", st == 202 and bool(tid), "HTTP %d id=%s status=%s" % (st, tid, tst))
+rec("C5 生图提交（异步）", st == 202 and bool(tid), "HTTP %d id=%s status=%s" % (st, tid, tst), need_key=True)
 
 print()
 print("=" * 78)
 print("D. 运行时状态")
 print("=" * 78)
-# data/ 与 logs/ 都由服务在首次启动时创建；全新 clone 上这两段都可能不存在。
-if os.path.exists(_db):
-    c2 = sqlite3.connect(_db); c2.row_factory = sqlite3.Row
+if os.path.exists(DB):
+    c2 = sqlite3.connect(DB); c2.row_factory = sqlite3.Row
     accs = [dict(r) for r in c2.execute("select id,status,weight,cooldown_until,expires_in,note from accounts")]
     rec("D1 账号池", all(a["status"] == "active" for a in accs),
         " ".join("#%s:%s/w%s" % (a["id"], a["status"], a["weight"]) for a in accs))
-    c2.close()
 else:
-    rec("D1 账号池", True, "跳过：数据库不存在", todo=True)
-
-_log_path = os.path.join("logs", "serve.log")
-if not os.path.exists(_log_path):
-    for tag in ("D2 清理线程跑过", "D3 提前续期跑过", "D4 设备头自愈日志", "D4b 护栏升级日志",
-                "D4c 换号日志", "D4d 429 退避日志", "D5 无未处理异常", "D6 无 500"):
-        rec(tag, True, "跳过：logs/serve.log 不存在", todo=True)
+    rec("D1 账号池", True, "跳过：%s 不存在（还没启动过服务）" % DB, todo=True)
+if os.path.exists(LOG_PATH):
+    _log = open(LOG_PATH, encoding="utf-8", errors="replace").read()
+else:
     _log = ""
-else:
-    _log = open(_log_path, encoding="utf-8", errors="replace").read()
+    rec("D2/D3/D4/D5/D6 日志检查", True, "跳过：%s 不存在（还没启动过服务）" % LOG_PATH, todo=True)
 logtail = _log[_log.rfind("marvis-proxy listening"):]  # 只看本次启动之后
 logall = _log
 if _log:
     for pat, tag in [("[cleanup]", "D2 清理线程跑过"), ("[refresh-ahead]", "D3 提前续期跑过")]:
         rec(tag, pat in logall, "累计 %d 次" % logall.count(pat))
-    # 这三条是「出问题时才出现」的自愈日志：没有 403/401/429 的平静期它们是空的，属正常
-    _recent_risk = sum(logtail.count(k) for k in ("4100404", "4100406", "4100403", " 429 ", "[throttle]"))
-    for pat, tag in [("[device]", "D4 设备头自愈日志"), ("[guard]", "D4b 护栏升级日志"),
-                     ("[failover]", "D4c 换号日志"), ("[throttle]", "D4d 429 退避日志")]:
-        n = logall.count(pat)
-        if n:
-            rec(tag, True, "累计 %d 次" % n)
+# 这三条是「出问题时才出现」的自愈日志：没有 403/401/429 的平静期它们是空的，属正常
+_recent_risk = sum(logtail.count(k) for k in ("4100404", "4100406", "4100403", " 429 ", "[throttle]"))
+for pat, tag in [("[device]", "D4 设备头自愈日志"), ("[guard]", "D4b 护栏升级日志"),
+                 ("[failover]", "D4c 换号日志"), ("[throttle]", "D4d 429 退避日志")]:
+    if not _log:
+        rec(tag, True, "跳过：没有日志文件", todo=True)
+        continue
+    n = logall.count(pat)
+    if n:
+        rec(tag, True, "累计 %d 次" % n)
+    else:
+        rec(tag, "warn" if _recent_risk == 0 else False,
+            "未触发（本次启动后上游 4xx 标记 %d 处；平静期为正常）" % _recent_risk)
+if _log:
+    # 客户端中途断开不是服务故障：流式回答写到一半用户关页面/按 Esc，
+    # socketserver 就会抛 ConnectionAbortedError(10053) / ConnectionResetError(10054)。
+    # 这类 Traceback 只说明「对方先走了」，不该把 D5 判红。
+    _BENIGN = ("ConnectionAbortedError", "ConnectionResetError", "BrokenPipeError",
+               "WinError 10053", "WinError 10054", "WinError 10058")
+    _tb = [i for i, line in enumerate(logtail.splitlines()) if "Traceback" in line]
+    _real = 0
+    _benign = 0
+    _loglines = logtail.splitlines()
+    for i in _tb:
+        block = "\n".join(_loglines[i:i + 30])
+        if any(k in block for k in _BENIGN):
+            _benign += 1
         else:
-            rec(tag, "warn" if _recent_risk == 0 else False,
-                "未触发（本次启动后上游 4xx 标记 %d 处；平静期为正常）" % _recent_risk)
-    rec("D5 无未处理异常", "Traceback" not in logtail, "Traceback 出现 %d 次" % logtail.count("Traceback"))
+            _real += 1
+    _d5d = "Traceback 出现 %d 次" % len(_tb)
+    if _benign:
+        _d5d += "（其中 %d 次为客户端断开，属正常）" % _benign
+    rec("D5 无未处理异常", _real == 0, _d5d)
     rec("D6 无 500", '" 500 -' not in logtail, "500 出现 %d 次" % logtail.count('" 500 -'))
 
 print()
 print("=" * 78)
-p = len([r for r in results if r[0] == "PASS"]); w = len([r for r in results if r[0] == "WARN"]); f = len([r for r in results if r[0] == "FAIL"])
-s = len([r for r in results if r[0] == "SKIP"])
+p = len([r for r in results if r[0] == "PASS"]); w = len([r for r in results if r[0] == "WARN"])
+f = len([r for r in results if r[0] == "FAIL"]); s = len([r for r in results if r[0] == "SKIP"])
 print("汇总：PASS %d / WARN %d / FAIL %d%s" % (p, w, f, (" / SKIP %d" % s) if s else ""))
-if s:
-    print("\n跳过项（环境未就绪，不算失败）：")
-    for tag, name, detail in results:
-        if tag == "SKIP": print("  -", name, "|", detail)
 if f:
     print("\n失败项：")
     for tag, name, detail in results:
         if tag == "FAIL": print("  ✗", name, "|", detail)
+if s:
+    print("\n跳过项（环境未就绪，不算失败）：")
+    for tag, name, detail in results:
+        if tag == "SKIP": print("  ·", name, "|", detail)

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<title>Marvis Proxy · 控制台</title>
+<link rel="icon" href="/console/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/console/fonts/fonts.css">
+<link rel="stylesheet" href="/console/css/console.css">
+</head>
+<body>
+<div class="sheet">
+
+  <aside class="rail" id="rail">
+    <div class="brand">
+      <div class="brand-line">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">MARVIS&nbsp;PROXY</span>
+      </div>
+      <p class="brand-sub">反向代理 · 观测台</p>
+    </div>
+
+    <nav class="nav" id="nav" aria-label="主导航"></nav>
+
+    <div class="rail-foot">
+      <dl class="foot-list" id="foot-list">
+        <div class="foot-row"><dt>监听</dt><dd id="foot-bind" class="num">—</dd></div>
+        <div class="foot-row"><dt>版本</dt><dd id="foot-ver" class="num">—</dd></div>
+        <div class="foot-row"><dt>进程</dt><dd id="foot-pid" class="num">—</dd></div>
+      </dl>
+      <button class="token-toggle" id="token-toggle" type="button" aria-expanded="false">管理令牌</button>
+      <div class="token-box" id="token-box" hidden>
+        <label class="token-label" for="token-input">X-Admin-Token</label>
+        <input class="token-input" id="token-input" type="password" autocomplete="off" placeholder="config.json 里的 admin_token">
+        <button class="token-save" id="token-save" type="button">保存</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="canvas" id="canvas">
+    <header class="pagehead">
+      <div class="pagehead-text">
+        <h1 class="pagehead-title" id="page-title">概览</h1>
+        <p class="pagehead-sub" id="page-sub">读取中…</p>
+      </div>
+      <div class="pagehead-tools">
+        <span class="stamp" id="stamp">—</span>
+        <button class="btn" id="btn-reload" type="button">重新读取</button>
+      </div>
+    </header>
+    <div class="view" id="view" role="region" aria-live="polite"></div>
+  </main>
+
+</div>
+
+<div class="toast-stack" id="toasts" role="status" aria-live="polite"></div>
+
+<div class="modal-root" id="modal-root" hidden>
+  <div class="modal-scrim" data-close="1"></div>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-head">
+      <h2 class="modal-title" id="modal-title">标题</h2>
+      <button class="modal-x" type="button" data-close="1" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-foot" id="modal-foot"></div>
+  </div>
+</div>
+
+<script type="module" src="/console/js/app.js"></script>
+</body>
+</html>

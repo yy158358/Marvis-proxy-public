@@ -1,17 +1,16 @@
-"""ZCode (Z.ai's agent harness).
+# -*- coding: utf-8 -*-
+"""ZCode（智谱的 agent harness）。
 
-ZCode keeps *one* provider file for both the desktop app and the CLI:
-``~/.zcode/v2/provider_config.json`` (underscore; ``ZCODE_PERSONAL_PROVIDER_CONFIG_FILE``
-can move it). It is a JSON document, so we splice spans instead of re-serialising:
-the user's other providers, their order and their model overrides stay byte-identical.
+桌面端和 CLI 共用一个 provider 文件：``~/.zcode/v2/provider_config.json``（下划线，
+``ZCODE_PERSONAL_PROVIDER_CONFIG_FILE`` 可以改位置）。它是 JSON，所以这里只按路径接
+写而不整份重排：用户其它的 provider、顺序、模型覆盖都要字节不动。
 
-Two things we deliberately avoid:
+两处刻意避开的坑：
 
-* Older tooling writes ``~/.zcode/v2/config.json`` instead. The official schema
-  says the two front-ends share ``provider_config.json``; when a ``config.json``
-  does exist we patch it too, but we never create one.
-* ``credentials.json`` is encrypted per device, so the gateway key goes into the
-  provider rule's ``access.apiKey`` — ZCode has no env-var indirection for it.
+* 旧工具写的是 ``~/.zcode/v2/config.json``。官方 schema 说两个前端共用
+  ``provider_config.json``；已有 ``config.json`` 时一并改，但绝不新建。
+* ``credentials.json`` 按设备加密，所以网关 key 放进 provider 规则的
+  ``access.apiKey`` —— ZCode 没有环境变量间接的方式。
 """
 from __future__ import annotations
 
@@ -25,8 +24,7 @@ from .atomic import newline_of, to_newline
 PROVIDER_CONFIG = ".zcode/v2/provider_config.json"
 DESKTOP_CONFIG = ".zcode/v2/config.json"
 
-#: 我们在 ZCode 里注册的供应商 id。和网关自己的 provider_id 保持一致，用户在两处
-#: 看到同一个名字；改这个值等于换一个供应商条目。
+#: 在 ZCode 里注册的供应商 id，与网关的 provider_id 一致；换这个值等于换一条供应商。
 PROVIDER_ID = "marvis-proxy"
 
 
@@ -37,9 +35,9 @@ class ZcodeAdapter(Adapter):
     needs_restart = True
     shadows_env_keys = ()
 
-    # ---- helpers ---------------------------------------------------------
+    # ---- 小工具 ---------------------------------------------------------
     def _optional_files(self) -> list[str]:
-        """Files we only touch when the user already has them."""
+        """只在用户本来就有的时候才碰的文件。"""
         present = [DESKTOP_CONFIG] if self.path(DESKTOP_CONFIG).exists() else []
         return present
 
@@ -52,7 +50,7 @@ class ZcodeAdapter(Adapter):
         model_id = target.id if target else model
         base = facts.openai_url if facts is not None else f"{self.gateway_url.rstrip('/')}/v1"
         name = facts.name if facts is not None else "Marvis Proxy"
-        # 模型清单跟着网关走：用户改了 models.json，ZCode 下拉里下次 apply 就同步。
+        # 模型清单跟着网关走：用户改了 models.json，ZCode 下拉下次 apply 就同步。
         if facts is not None:
             ids = [m.id for m in facts.models]
         else:
@@ -68,8 +66,8 @@ class ZcodeAdapter(Adapter):
                 "access": {"type": "api-key", "apiKey": self.gateway_key},
                 "api": {
                     "type": "openai-chat-completions",
-                    # ZCode 自己拼 /chat/completions，所以 baseUrl 必须停在 /v1，
-                    # 且不带尾斜杠，否则请求会发成 //v1/chat/completions 并 404。
+                    # ZCode 自己拼 /chat/completions，baseUrl 必须停在 /v1 且无尾斜杠，
+                    # 否则请求发成 //v1/chat/completions 直接 404。
                     "baseUrl": base,
                 },
                 "personalModelIds": ids,
@@ -78,7 +76,7 @@ class ZcodeAdapter(Adapter):
         }
         return rule, model_id
 
-    # ---- hooks -----------------------------------------------------------
+    # ---- 钩子 -----------------------------------------------------------
     def plan(self, model: str, effort: str | None) -> list[Entry]:
         entries: list[Entry] = []
         for rel in (PROVIDER_CONFIG, *self._optional_files()):
@@ -124,16 +122,15 @@ class ZcodeAdapter(Adapter):
         config = doc.setdefault("config", {})
         before = json.loads(text) if text.strip() else {}
         if "schemaVersion" not in before:
-            # A file we are creating gets stamped; an existing one keeps whatever
-            # version it already declares.
+            # 新建的文件打上版本号；已有的保留它自己声明的。
             doc.setdefault("schemaVersion", 1)
         rules = config.setdefault("providerConfigRules", {}).setdefault("providerRules", [])
 
         rule, model_id = self._rule(model, effort)
         for index, existing in enumerate(rules):
             if existing.get("providerId") == PROVIDER_ID:
-                # Keep anything we do not own on the user's own copy of the rule
-                # (a custom logo, a hidden flag), then overwrite our connection bits.
+                # 用户自己写在这条规则里的东西（自定义图标、隐藏标记）原样保留，只覆盖
+                # 我们负责的连接信息。
                 merged = dict(existing)
                 merged.update(rule)
                 merged["config"] = {**existing.get("config", {}), **rule["config"]}
@@ -147,7 +144,7 @@ class ZcodeAdapter(Adapter):
             order.append(PROVIDER_ID)
 
         model_config_rules = config.setdefault("modelConfigRules", {})
-        # Both arrays must exist even when empty: ZCode validates their presence.
+        # 两个数组即使为空也必须存在，ZCode 会校验它们在不在。
         model_config_rules.setdefault("providerModelRules", [])
         model_config_rules.setdefault("manualProviderModelRules", [])
 
@@ -162,8 +159,7 @@ class ZcodeAdapter(Adapter):
         style_entry = next((e for e in entries if e.kind == "zcode-style"), None)
         style = json.loads(style_entry.value) if style_entry is not None and style_entry.value else None
         if style is not None and style.get("empty"):
-            # The file was blank when we snapshotted it: whatever is in it now is
-            # ours, so blank it again instead of leaving an empty JSON object.
+            # 快照时文件是空的：现在里面的东西都是我们写的，清空而不是留个 {}。
             return ""
         doc = _load(text)
         if not (text or "").strip():
@@ -175,7 +171,7 @@ class ZcodeAdapter(Adapter):
         if provider_entry is not None:
             rules = [r for r in rules if r.get("providerId") != PROVIDER_ID]
             if provider_entry.present and provider_entry.value:
-                # The user already had a provider with our id: put theirs back.
+                # 用户本来就有同 id 的 provider，把他们的放回去。
                 rules.append(json.loads(provider_entry.value))
             config.setdefault("providerConfigRules", {})["providerRules"] = rules
 
@@ -204,18 +200,16 @@ class ZcodeAdapter(Adapter):
         if not model_config_rules:
             config.pop("modelConfigRules", None)
 
-        # Everything below `config` is scaffolding we may have invented: the
-        # providerConfigRules wrapper, an empty `config` object, even schemaVersion
-        # on a file that had no config block at all. Rebuild bottom-up and drop any
-        # layer that did not exist before, so a rollback is byte-identical.
+        # `config` 下面可能整个是我们搭的脚手架：providerConfigRules 外壳、空的
+        # `config`、甚至原本一个键都没有时的 schemaVersion。自底向上清掉，回滚才逐字节
+        # 一致。
         config_rules = config.get("providerConfigRules")
         if isinstance(config_rules, dict) and not config_rules.get("providerRules"):
             config.pop("providerConfigRules", None)
         if not config:
             doc.pop("config", None)
-        # Compare against the word list captured *before* we touched the file:
-        # `text` here is the file as we left it, so it still carries everything we
-        # invented. Anything on that list is put back in the user's original order.
+        # 与动手前记下的键序比：这里的 text 是我们写完之后的文件，仍带着我们加的东西。
+        # 按原序重排。
         recorded = next((e for e in entries if e.kind == "zcode-topkeys"), None)
         before = json.loads(recorded.value) if recorded is not None and recorded.value else None
         if before is not None:
@@ -242,11 +236,10 @@ _OBJECT_RE = re.compile(r"\{[^{}]*\}", re.S)
 
 
 def _dump(doc: dict, original: str, newline: str, style: dict | None = None) -> str:
-    """Serialise in the file's own style, so a one-key change stays a one-key diff.
+    """按文件自己的排版序列化，改一个键就只差一行。
 
-    ``style`` carries what we could not recover from ``original`` alone (a file we
-    are rewriting now looks different from the one we recorded): its indent, the
-    separator after ``:``, and which sub-objects sat on a single line.
+    ``style`` 补的是光看 ``original`` 推不出来的东西（回滚时拿到的文件已被我们改过）：
+    缩进、``:`` 后的分隔符、哪些子对象原本写在一行。
     """
     style = style or {}
     original = original if original.strip() else ""
@@ -268,14 +261,12 @@ def _dump(doc: dict, original: str, newline: str, style: dict | None = None) -> 
 
 
 def _split_sep(separator: str, indent) -> tuple[str, str]:
-    """``json.dumps`` takes (item_separator, key_separator).
+    """``json.dumps`` 的两个分隔符：(项之间, 键值之间)。
 
-    Only the item separator is a real choice (some files write ``[1, 2]``, others
-    ``[1,2]``); the key separator is always ``": "`` for indented output and ``":"``
-    for the compact form. ``json.dumps`` keeps the indentation and appends the
-    item separator after the comma, so passing ", " even with ``indent`` emits
-    ``"a": 1, `` with a trailing space on every non-last key. Both are pinned
-    here rather than derived from the file.
+    只有项分隔符是真选择（有的文件写 ``[1, 2]``，有的写 ``[1,2]``）；键值分隔符在缩进
+    输出里恒为 ``": "``、紧凑形式里恒为 ``":"``。注意 ``json.dumps`` 带缩进时会把项分隔
+    符接在逗号后面，所以传 ``", "`` 会在每个非末键后留下尾随空格 —— 这里两者都钉死，
+    不从文件推。
     """
     if indent is None:
         return (", ", ": ") if separator == ", " else (",", ":")
@@ -283,7 +274,7 @@ def _split_sep(separator: str, indent) -> tuple[str, str]:
 
 
 def _style_of(text: str) -> dict:
-    """Everything about the layout that ``json.dumps`` would otherwise flatten."""
+    """``json.dumps`` 会抹平的全部排版信息。"""
     trailing = text.endswith("\n")
     if not text.strip():
         return {"indent": None, "separator": ",", "inline": [], "trailing_newline": trailing,
@@ -300,11 +291,10 @@ def _style_of(text: str) -> dict:
 
 
 def _inline_paths(text: str) -> list:
-    """Paths of ``{...}``/``[...]`` values the user kept on one line.
+    """用户原本写在一行上的 ``{...}``/``[...]`` 值所在路径。
 
-    Walks the parse tree instead of regex-scanning the text, because two
-    different inline values can be textually identical (``{"a": 1}`` appears
-    more than once) and a text match cannot tell which one owns which path.
+    走解析树而不是正则扫文本：两处行内值可能字面完全相同（``{"a": 1}`` 出现不止一次），
+    文本匹配分不清哪个属于哪条路径。
     """
     paths = []
     try:
@@ -339,7 +329,7 @@ def _inline_paths(text: str) -> list:
 
 
 def _inline_nodes(text: str) -> object:
-    """Re-parse ``text`` keeping, for every container, its own source text."""
+    """重新解析 ``text``，为每个容器保留它自己的源文本。"""
     body = text.strip()
     depth_stack: list[str] = []
 
@@ -398,7 +388,7 @@ def _inline_nodes(text: str) -> object:
 
 
 class _Raw:
-    """A parsed value plus the exact source text it came from."""
+    """解析出的值 + 它来自的那段源文本。"""
 
     __slots__ = ("src", "data")
 
@@ -408,11 +398,9 @@ class _Raw:
 
 
 def _collapse_value(text: str, path: tuple) -> str:
-    """Fold one value back onto a single line inside an already-formatted dump.
+    """在已排好版的内容里，把某个值折回一行。
 
-    Best-effort by design: this only runs for paths we recorded as inline in the
-    file we snapshotted, and it gives up (returning the text untouched) if the
-    brackets in the dump do not balance the way we expect.
+    只在快照里记过的行内路径上跑；括号层级对不上就原样返回，不硬折。
     """
     if not path:
         return text
@@ -457,11 +445,11 @@ def _collapse_value(text: str, path: tuple) -> str:
 
 
 def _indent(text: str):
-    """Reuse the file's own layout: absent lines, compact form, tab, or N spaces."""
+    """沿用文件自己的排版：没有子行、紧凑形式、tab 或 N 个空格。"""
     if not text.strip():
         return 2
     if "\n" not in text.strip():
-        # A one-line file must stay a one-line file.
+        # 单行文件必须还是单行文件。
         return None
     for line in text.splitlines()[1:]:
         stripped = line.strip()

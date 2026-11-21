@@ -9,6 +9,9 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 OUT="backups/marvis-$STAMP.tar.gz"
 TMP=$(mktemp -d 2>/dev/null || echo "/tmp/mvbackup.$$")
 mkdir -p "$TMP"
+# 临时目录无论成败都要清：中途被打断时留在 /tmp 里的整份数据库副本
+# 既占空间，又是一份没人管的明文凭据。
+trap 'rm -rf "$TMP"' EXIT INT TERM
 
 python3 - "$TMP" <<'PY'
 import sqlite3, sys, os
@@ -22,13 +25,14 @@ print("db ->", dst, os.path.getsize(dst), "B")
 PY
 
 cp -f config.json models.json "$TMP"/ 2>/dev/null
-tar -czf "$OUT" -C "$TMP" . 2>/dev/null
-rm -rf "$TMP"
-if [ -f "$OUT" ]; then
-  echo "备份完成: $OUT ($(wc -c < "$OUT") B)"
-else
+# 先写临时名再改名：tar 写到一半失败时不会留下一个能被 ls 当成完整备份的半个归档
+if ! tar -czf "$OUT.part" -C "$TMP" . 2>/dev/null; then
+  rm -f "$OUT.part"
   echo "备份失败"; exit 1
 fi
+mv -f "$OUT.part" "$OUT"
+[ -f "$OUT" ] || { echo "备份失败"; exit 1; }
+echo "备份完成: $OUT ($(wc -c < "$OUT") B)"
 
 # 只留最近 $KEEP 份
 ls -1t backups/marvis-*.tar.gz 2>/dev/null | tail -n +$((KEEP+1)) | while read -r f; do rm -f "$f"; done

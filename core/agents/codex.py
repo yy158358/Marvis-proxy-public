@@ -1,21 +1,17 @@
 # -*- coding: utf-8 -*-
 """Codex CLI：``~/.codex/config.toml`` + 模型目录文件。
 
-两点和 Claude Code 完全不同：
+两点与 Claude Code 不同：
 
 1. Codex 启动时按它认识的 provider 校验 ``model``，所以模型清单要单独落一个 JSON
-   文件（``model_catalog_json``）——也因此 **必须重启 Codex**。
-2. **它说 Responses API，marvis-proxy 说 chat-completions。** 我们不做协议猜测：
-   provider 块里写 ``wire_api = "chat"``，直接走 proxy 现成的
-   ``/v1/chat/completions``（流式和工具调用都是现成的）。写 ``"responses"`` 会连到
-   一个不存在的端点，而错误信息看起来像是 model 名字错了，很难查。
+   （``model_catalog_json``），也因此 **改完必须重启 Codex**。
+2. Codex 说 Responses API，marvis-proxy 说 chat-completions。这里不做协议猜测：
+   provider 块写 ``wire_api = "chat"``，直接走现成的 ``/v1/chat/completions``。
+   写 ``"responses"`` 会连到不存在的端点，报错还像 model 名字错了。
 
-两种形状，按「是否登录了 ChatGPT 套餐」分：
-
-* 登录了  -> 只改 ``openai_base_url`` 和 ``model``，保留自带 provider，套餐照用；
-* 没登录  -> 注册一个 provider，并把它设为当前 provider。
-
-provider 表里带 key，所以 key 不会落到环境变量里。
+按「是否登录了 ChatGPT 套餐」分两种形状：登录了只改 ``openai_base_url`` 和 ``model``，
+保留自带 provider；没登录就注册一个 provider 并设为当前。key 放在 provider 表里，不落
+环境变量。
 """
 from __future__ import annotations
 
@@ -47,9 +43,9 @@ PROVIDER_ID = "marvis-proxy"
 PROVIDER_TABLE = "model_providers.marvis-proxy"
 TOP_KEYS = (MODEL, EFFORT, PROVIDER, OPENAI_BASE_URL, CATALOG_KEY)
 
-#: Codex 的 provider 表示层。取 chat 而不是 responses，理由见模块开头。
+#: provider 表示层。取 chat 而非 responses，理由见模块开头。
 WIRE_API = "chat"
-#: Codex 只认这几档；给多了会被静默丢弃，不如不写。
+#: Codex 只认这几档，给多了会被静默丢弃。
 EFFORTS = ("minimal", "low", "medium", "high")
 
 
@@ -70,19 +66,17 @@ class CodexAdapter(Adapter):
         return self.path(CATALOG)
 
     def catalog(self, model):
-        """整份模型清单：Codex 从这里读上下文长度和输出上限，不读我们的 models.json。"""
+        """整份模型清单。Codex 从这里读上下文长度和输出上限，不读我们的 models.json。"""
         facts = self.facts
         rows = []
-        wanted = facts.models if facts is not None else []
-        for item in wanted:
-            row = {
+        for item in (facts.models if facts is not None else []):
+            rows.append({
                 "slug": item.id,
                 "display_name": item.display,
                 "context_window": item.context_window or 200000,
                 "max_output_tokens": item.max_output_tokens or 32000,
                 "supported_reasoning_efforts": list(EFFORTS),
-            }
-            rows.append(row)
+            })
         if not rows:
             rows.append({
                 "slug": model, "display_name": model, "context_window": 200000,
@@ -90,7 +84,7 @@ class CodexAdapter(Adapter):
             })
         return {"models": rows}
 
-    # ---- hooks -----------------------------------------------------------
+    # ---- 钩子 -----------------------------------------------------------
     def plan(self, model, effort):
         path = self.path(CONFIG)
         text, _, _ = self.load_text(path)
@@ -99,8 +93,8 @@ class CodexAdapter(Adapter):
             found = toml_find_key(text, key, None)
             entries.append(Entry(file=str(path), path=[key], present=found is not None,
                                  value=found[2] if found else None, kind="toml"))
-        # provider 表是全有全无：记下在不在、原文（用户的表要原样还回去），以及它
-        # 前面是哪张表（回滚时好放回原位，而不是追加到文件末尾）。
+        # provider 表全有全无：记下在不在、原文、以及它前面是哪张表 —— 回滚要放回原位，
+        # 不是追加到文件末尾。
         has_table = toml_has_table(text, PROVIDER_TABLE)
         before, _after = toml_table_neighbours(text, PROVIDER_TABLE)
         entries.append(Entry(file=str(path), path=PROVIDER_TABLE.split("."),
@@ -121,15 +115,14 @@ class CodexAdapter(Adapter):
         if path.name == CATALOG.split("/")[-1]:
             return json.dumps(self.catalog(model_id), indent=2, ensure_ascii=False) + "\n"
 
+        text = toml_set_key(text, MODEL, None, toml_quote(model_id))
         if self._signed_in():
             # 保留自带的 ChatGPT provider，只把端点和模型挪走。
-            text = toml_set_key(text, MODEL, None, toml_quote(model_id))
             text = toml_set_key(text, OPENAI_BASE_URL, None, toml_quote(base))
             text = toml_delete_key(text, PROVIDER, None)
             text = toml_delete_key(text, CATALOG_KEY, None)
             text = toml_remove_table(text, PROVIDER_TABLE)
         else:
-            text = toml_set_key(text, MODEL, None, toml_quote(model_id))
             text = toml_set_key(text, PROVIDER, None, toml_quote(PROVIDER_ID))
             text = toml_set_key(text, CATALOG_KEY, None, toml_quote(str(self.catalog_path())))
             text = toml_set_table(text, PROVIDER_TABLE, {
@@ -155,20 +148,18 @@ class CodexAdapter(Adapter):
                 continue
             if key == ["*"]:
                 continue
-            plain = key[0]
             if entry.present:
-                text = toml_set_key(text, plain, None, str(entry.value))
+                text = toml_set_key(text, key[0], None, str(entry.value))
             else:
-                text = toml_delete_key(text, plain, None)
+                text = toml_delete_key(text, key[0], None)
         return to_newline(text, newline)
 
 
 def _table_body(text, table):
-    """``[table]`` 里面的行，原样（不含表头）。"""
-    lines = text.splitlines()
+    """``[table]`` 里的行，原样，不含表头。"""
     out = []
     inside = False
-    for line in lines:
+    for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             inside = stripped.strip("[]").strip() == table
@@ -181,10 +172,7 @@ def _table_body(text, table):
 
 
 def _restore_table(text, table, body, after):
-    """把表放回用户原来的位置。
-
-    ``after`` 是快照里它的前一张表，所以回滚保持表序，而不是把表挪到文件末尾。
-    """
+    """把表放回原位：``after`` 是快照里它前面那张表，保持表序而不挪到文件末尾。"""
     if not body.strip():
         return toml_remove_table(text, table)
     text = toml_remove_table(text, table)

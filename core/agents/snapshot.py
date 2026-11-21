@@ -1,27 +1,21 @@
 # -*- coding: utf-8 -*-
-"""原值快照：存在 marvis.db 里，一份 agent 一行。
+"""原值快照：一个 agent 一行，存在 marvis.db 的 ``wire_snapshots`` 表里。
 
-    表 wire_snapshots(agent PRIMARY KEY, json, updated_at)
-
-为什么进库、不像 magpie-min 那样一个 agent 一个 JSON 文件：
-  · 反代已经有 Store / sqlite / 备份链，backups/marvis-*.tar.gz 会顺带把快照一起备走，
-    用户「回滚到上周的配置」时凭据不会单独丢一份；
-  · 一个库文件比 snapshots/ 一层目录好审计——`SELECT * FROM wire_snapshots` 就能看见
-    现在哪个 agent 的配置被我们改过。
+为什么进库而不是像 magpie-min 那样一个 agent 一个 JSON 文件：
+  · 反代已有 sqlite 与备份链，``backups/marvis-*.tar.gz`` 顺带把快照备走；
+  · ``SELECT * FROM wire_snapshots`` 就能看见现在改过谁的配置，好审计。
 
 文档形状（json 列）::
 
     {
       "agent": "claude-code",
       "created_at": "2026-11-20T07:00:00+0800",
-      "gateway": {"id": "marvis-proxy", "base": "http://127.0.0.1:8088",
-                  "anthropic": "http://127.0.0.1:8088", "openai": "http://127.0.0.1:8088/v1"},
       "files": {
         "C:/Users/x/.claude/settings.json": {
           "existed": true, "mode": 384,
-          "hash_original": "…",    # 第一次见到它时的内容
-          "hash_written": "…",     # 我们最后一次写完之后的内容
-          "backup": "C:/…/data/wire-backups/claude-code/0-original/settings.json",
+          "hash_original": "…",   # 第一次见到它时的内容
+          "hash_written": "…",    # 我们最后一次写完之后的内容
+          "backup": "…/wire-backup/claude-code/0-original/settings.json",
           "meta": {"trailing_newline": true}
         }
       },
@@ -31,14 +25,13 @@
       "applied": {"model": "...", "effort": "high", "at": "..."}
     }
 
-回滚只读这份文档 + 它旁边的逐字节备份。它**不猜**「哪几行看起来像我们写的」：
-每个 entry 都记着这个键原来在不在、原来是什么值，每个文件都记着是不是我们新建的。
+回滚只读这份文档加旁边的逐字节备份，不猜「哪几行像我们写的」：每个 entry 都记着
+键原来在不在、值是什么，每个文件都记着是不是我们新建的。
 """
 from __future__ import annotations
 
 import json
 import time
-from typing import Any
 
 from . import atomic
 
@@ -52,7 +45,7 @@ CREATE TABLE IF NOT EXISTS wire_snapshots (
 
 
 class SnapshotStore(object):
-    """和 Store 同一个用法：拿 ctx["store"].conn() 落库。"""
+    """和 Store 一个用法，走 ``ctx["store"].conn()`` 落库。"""
 
     def __init__(self, store, backup_root):
         self.store = store
@@ -70,7 +63,7 @@ class SnapshotStore(object):
             return None
 
     def save(self, data):
-        blob = json.dumps(data, indent=2, ensure_ascii=False, sort_keys=False)
+        blob = json.dumps(data, indent=2, ensure_ascii=False)
         self.store.x(
             "INSERT INTO wire_snapshots(agent,json,updated_at) VALUES(?,?,?) "
             "ON CONFLICT(agent) DO UPDATE SET json=excluded.json, updated_at=excluded.updated_at",
@@ -102,8 +95,7 @@ class SnapshotStore(object):
         return atomic.read_bytes(backup)
 
     def purge_backups(self, agent):
-        folder = atomic._paths.abs("%s/%s" % (self.backup_root, agent))
-        _rmtree(folder)
+        _rmtree(atomic._paths.abs("%s/%s" % (self.backup_root, agent)))
 
 
 def _rmtree(folder):

@@ -1,7 +1,7 @@
 # Marvis 生图独立工具：挂到 DSH 的配置片段
 #
 # 这是一段「复制即用」的配置：把它追加到
-#   <DSH 配置目录>\cordis.patch.yml
+#   %USERPROFILE%\.dsh\profiles\<profile>\cordis.patch.yml
 # 的顶层列表里（和 agent-default-model、tools 那些同级），然后重启 DSH 本体。
 #
 # 挂上之后，模型的工具列表里会出现：
@@ -22,7 +22,7 @@
     transport: stdio
     command: py
     args: ['-3', 'tools/mcp_image_server.py']
-    cwd: /path/to/marvis-proxy
+    cwd: E:/deepseek-work/dsh-marvis-proxy/marvis-proxy
     toolCallTimeoutMs: 600000
     env:
       MARVIS_PROXY_BASE: http://127.0.0.1:8088
@@ -35,8 +35,8 @@
 # MARVIS_PROXY_KEY：不设也行，服务端会去 data/client_keys.txt 找第一个非注释行。
 #                   如果代理那边轮换了 key，改那个文件即可，不用动这里。
 # 想换 python 解释器：command 改成绝对路径，例如
-#   command: /path/to/python.exe
+#   command: C:/Python314/python.exe
 # 想验证工具本身能跑（不经过 DSH）：
-#   cd <本项目目录>
+#   cd <本工程目录>
 #   py -3 tools\mcp_image_server.py   然后手工喂一行 JSON：
 #   {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}

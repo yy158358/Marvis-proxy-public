@@ -1,32 +1,25 @@
-"""Comment-preserving YAML editing for config *documents* (settings / patch files).
+# -*- coding: utf-8 -*-
+"""保留注释的 YAML 文档编辑（settings / patch 文件用）。
 
-Why this exists
----------------
-The YAML files this tool touches are edited by humans and by other tools:
+为什么自己写：这里碰的两个文件既有人的手笔也有别工具的笔迹 ——
 
-    ~/.dsh/settings.yaml                       (DSH settings, namespaced sections)
-    ~/.dsh/profiles/<profile>/cordis.patch.yml (DSH loader patch list)
+    ~/.dsh/settings.yaml                        （DSH 运行时设置，带命名空间的段）
+    ~/.dsh/profiles/<profile>/cordis.patch.yml  （DSH 加载器的插件列表）
 
-PyYAML is neither installed nor a dependency we may add, and a full
-re-serialisation would destroy comments, key order, anchors and block scalars.
-So a document is modelled as a tree of nodes that know their **line and column
-span**, and every edit is one of:
+本机既没装 PyYAML，也不该为它加依赖；整份重新序列化又会毁掉注释、键序、锚点和块
+标量。所以把文档建模成「知道自己行/列区间的节点树」，每次编辑只做三件事之一：
 
-  * ``set(path, value)``  -> replace the value span on one physical line
-  * ``insert(path, ..)``  -> insert new lines at the end (or head) of a block
-  * ``delete(path)``      -> blank the line of one scalar entry
+  * ``set(path, value)``   —— 在一行上替换值的区间
+  * ``insert(path, ..)``   —— 在块尾（或头部）插入整行
+  * ``delete(path)``       —— 清空某个标量条目所在的行
 
-Every line we did not touch is emitted from its original text, byte for byte,
-which is what keeps the mojibake comments and the user's own formatting intact.
+没动过的行按原文本逐字节输出，乱码注释和用户排版才留得住。
 
-Parser scope: block mappings, block sequences, flow scalars, quoted scalars,
-block scalars (``|``/``>``), comments and blank lines. ``!!js`` expressions stay
-opaque scalars, which is exactly what a value we never rewrite needs.
+解析范围：块映射、块序列、流式标量、引号标量、块标量（``|``/``>``）、注释与空行。
+``!!js`` 表达式当作不透明标量 —— 我们不会重写的值本来就该这样。
 
-Grammar note: a ``-`` dash and its mapping key may share a line
-(``- id: llm-pi-ai``). The loader records such a mapping as starting on the dash
-line at column ``dash+2``; every key below it lives at that column, which keeps
-the parse a single indentation check.
+语法提醒：``-`` 与它后面的映射键可以同行（``- id: llm-pi-ai``）。这种映射记作「起于
+dash 行、列在 dash+2」，下面所有键都在那一列，判断缩进只需一次比较。
 """
 from __future__ import annotations
 
@@ -34,11 +27,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterator
 
-# --------------------------------------------------------------------------- model
+# --------------------------------------------------------------------------- 节点
 
 
 class YNode:
-    """Base class for every YAML node."""
+    """所有 YAML 节点的基类。"""
 
     line: int = -1
     indent: int = 0
@@ -49,7 +42,7 @@ class YNode:
 
 @dataclass
 class YScalar(YNode):
-    """A one-line value; ``start``/``end`` are its column span inside ``line``."""
+    """单行值；``start``/``end`` 是它在 ``line`` 里的列区间。"""
 
     text: str = ""
     line: int = -1
@@ -57,12 +50,12 @@ class YScalar(YNode):
     start: int = 0
     end: int = 0
     empty: bool = False
-    block: bool = False  # `|` / `>` scalar: never rewritten
+    block: bool = False  # `|` / `>` 块标量：永不重写
 
 
 @dataclass
 class YMap(YNode):
-    """A block mapping, keeping the original key order."""
+    """块映射，保留原键序。"""
 
     indent: int = 0
     line: int = -1
@@ -74,7 +67,7 @@ class YMap(YNode):
 
 @dataclass
 class YSeq(YNode):
-    """A block sequence, keeping the original item order."""
+    """块序列，保留原项序。"""
 
     indent: int = 0
     line: int = -1
@@ -84,13 +77,13 @@ class YSeq(YNode):
         return iter(self.items)
 
 
-# --------------------------------------------------------------------------- document
+# --------------------------------------------------------------------------- 文档
 
 _MAP_ENTRY = re.compile(r"^(\"[^\"]*\"|'[^']*'|[^:#\s][^:]*?)[ \t]*:(?=[ \t]|$)")
 
 
 class YamlDoc:
-    """A YAML document that edits in place."""
+    """就地编辑的 YAML 文档。"""
 
     def __init__(self, lines: list[str], newline: str = "\n"):
         self.lines = lines
@@ -106,27 +99,112 @@ class YamlDoc:
     def render(self) -> str:
         return "".join(self.lines)
 
-    # -- queries -------------------------------------------------------
-    def node(self, path: tuple) -> YNode | None:
+    # -- 查询 ---------------------------------------------------------
+    def _lookup(self, path) -> YNode | None:
+        """``self.nodes`` 按真实下标取；路径里带 ``{"id": x}`` 时先解析。"""
+        if not path:
+            return self.root
+        if any(isinstance(step, dict) for step in path):
+            hit = self.entry(path)
+            return None if hit is None else hit[1]
         return self.nodes.get(tuple(path))
 
+    def _real(self, path) -> tuple:
+        """把可能带 ``{"id": x}`` 的路径换成真实下标路径；解析不出来就原样返回。"""
+        path = tuple(path)
+        if not any(isinstance(step, dict) for step in path):
+            return path
+        hit = self.entry(path)
+        if hit is not None:
+            return hit[0]
+        # 末段还没生成：只要前缀能解析，就把前缀换成真实下标，末段原样留着。
+        for cut in range(len(path) - 1, 0, -1):
+            if not any(isinstance(step, dict) for step in path[:cut]):
+                continue
+            hit = self.entry(path[:cut])
+            if hit is not None:
+                return hit[0] + path[cut:]
+        return path
+
+    @staticmethod
+    def _hashable(path) -> tuple | None:
+        """把可能还带 ``{"id": x}`` 的路径变成可哈希的真实键。"""
+        out = []
+        for step in tuple(path):
+            out.append(step if not isinstance(step, dict) else tuple(step.items()))
+        try:
+            hash(tuple(out))
+        except TypeError:  # pragma: no cover - 防御：调用方给了不可哈希的东西
+            return None
+        return tuple(out)
+
+    def node(self, path: tuple) -> YNode | None:
+        if any(isinstance(step, dict) for step in path):
+            hit = self.entry(path)
+            return None if hit is None else hit[1]
+        return self.nodes.get(tuple(path))
+
+    def entry(self, path: tuple) -> tuple[tuple, YNode] | None:
+        """把「序列里的某项」按 id 而不是序号寻址。
+
+        DSH 的 profile 是插件列表 ``- id: llm-pi-ai``；按 ``(1,)`` 定位，用户插一个
+        插件就全错。序列那层允许写 ``{"id": "llm-pi-ai"}``，这里换成真实下标。
+        返回 (真实路径, 节点)，找不到给 None。
+        """
+        current: YNode | None = self.root
+        real: list = []
+        for step in path:
+            if current is None:
+                return None
+            if isinstance(step, dict):
+                wanted = step.get("id")
+                found = None
+                if isinstance(current, YSeq):
+                    for index, item in enumerate(current.items):
+                        if isinstance(item, YMap):
+                            key_node = item.items.get("id")
+                            if (isinstance(key_node, YScalar)
+                                    and key_node.text.strip("'\"") == wanted):
+                                found = index
+                                break
+                elif isinstance(current, YMap) and wanted in current.items:
+                    found = wanted
+                if found is None:
+                    return None
+                real.append(found)
+                current = current.items[found]
+                continue
+            if isinstance(current, YSeq):
+                index = step if isinstance(step, int) else -1
+                if not (0 <= index < len(current.items)):
+                    return None
+                real.append(index)
+                current = current.items[index]
+                continue
+            if isinstance(current, YMap) and step in current.items:
+                real.append(step)
+                current = current.items[step]
+                continue
+            return None
+        return tuple(real), current
+
     def scalar(self, path: tuple) -> str | None:
-        node = self.nodes.get(tuple(path))
+        node = self._lookup(path)
         return node.text if isinstance(node, YScalar) and not node.empty else None
 
     def keys(self, path: tuple) -> list[str]:
         if not path:
             return list(self.root.items) if isinstance(self.root, YMap) else []
-        node = self.nodes.get(tuple(path))
+        node = self._lookup(path)
         return list(node.items) if isinstance(node, YMap) else []
 
     def paths(self) -> list[tuple]:
         return list(self.nodes)
 
-    # -- edits ---------------------------------------------------------
+    # -- 编辑 ---------------------------------------------------------
     def set(self, path: tuple, value: str) -> bool:
-        """Replace one scalar value, keeping the rest of its line (incl. comment)."""
-        node = self.nodes.get(tuple(path))
+        """替换一个标量值，其余部分（含行尾注释）不动。"""
+        node = self._lookup(path)
         if not isinstance(node, YScalar) or node.line < 0 or node.block:
             return False
         line = self.lines[node.line]
@@ -138,107 +216,131 @@ class YamlDoc:
             head = body[: node.start]
             tail = body[node.end:]
             if not head.endswith((" ", "\t")):
-                # Some parsers hand back a value column that starts ON the key text:
-                # rewriting `displayName` in place turned it into `dimagpiee`. A key
-                # separator restores the shape of the line.
+                # 值列有可能从键文本上开始：就地重写 `displayName` 曾把它变成
+                # `dimagpiee`。补一个键值分隔符把这一行的形状修回来。
                 head = head.rstrip() + ": "
             self.lines[node.line] = head + value + tail + nl
         return True
 
     def put(self, path: tuple, value: str) -> bool:
-        """Set ``path`` to ``value``, creating the key when the section lacks it."""
+        """把 ``path`` 设为 ``value``，段里没这个键就建一个。"""
         self._resync()
-        if isinstance(self.nodes.get(tuple(path)), YScalar):
-            return self.set(path, value)
-        if self.nodes.get(tuple(path)) is not None:
-            return False  # a block where a scalar belongs: leave it to the caller
-        parent = tuple(path[:-1])
+        real = self._real(path)
+        if isinstance(self.nodes.get(tuple(real)), YScalar):
+            return self.set(real, value)
+        if self.nodes.get(tuple(real)) is not None:
+            return False  # 该放标量的位置是个块：交给调用方
+        parent = tuple(real[:-1])
         if parent and self.nodes.get(parent) is None:
             self.ensure_block(parent)
         self._resync()
+        real = self._real(path)
+        parent = tuple(real[:-1])
         node = self.nodes.get(parent) if parent else self.root
         if node is None:
             raise KeyError("no such path: " + ".".join(map(str, path)))
         if isinstance(node, YMap):
             indent = node.indent + 2
             if node.items:
-                # Align with the keys this mapping already has: a section written by
-                # another tool may sit two columns deeper than its header suggests.
+                # 对齐这个映射已有的键：别的工具写的段可能比表头深两列。
                 indent = min(child.indent for child in node.items.values())
         else:
             indent = node.indent + 2
         at = (_last_line_index(self, parent) + 1) if parent else len(self.lines)
-        self.lines.insert(at, " " * indent + f"{path[-1]}: {value}" + self.newline)
+        self.lines.insert(at, " " * indent + f"{real[-1]}: {value}" + self.newline)
         self._resync()
         return True
 
     def _resync(self) -> None:
-        """Reparse this document from its own lines.
+        """用自己当前的行重新解析。
 
-        Every edit that inserts lines invalidates the line numbers stored on the
-        nodes, so each step that needs a position parses again rather than trusting
-        a handle taken before the previous insert.
+        任何插入都会作废节点上的行号，所以每步要定位时都重新解析，不信上一次插入前
+        拿到的句柄。
         """
         fresh = YamlDoc(list(self.lines), self.newline)
         self.lines, self.nodes, self.root = fresh.lines, fresh.nodes, fresh.root
 
     def delete(self, path: tuple) -> None:
-        """Blank the declaration line of one scalar entry."""
-        node = self.nodes.get(tuple(path))
+        """清空某个标量条目所在的行。"""
+        node = self._lookup(path)
         if isinstance(node, YScalar) and node.line >= 0:
             self.lines[node.line] = ""
 
     def ensure_block(self, path: tuple) -> bool:
-        """Create an empty mapping at ``path`` (and its ancestors) when it is missing.
+        """``path`` 缺失时建空映射（祖先一起建）。
 
-        Returns True when a block was already there. Callers that add a section to a
-        file the user may never have written (a fresh settings file) use this instead
-        of guessing the layout themselves.
+        已存在则返回 True。往用户可能从没写过的文件里加段时调用它，而不是自己猜排版。
         """
-        noderaw = self.root if not path else self.nodes.get(tuple(path))
+        noderaw = self._lookup(path)
         if noderaw is None and path:
-            # Section headers are words, not paths: the loader nests each plugin's
-            # settings under its own `config:`, so `llm-pi-ai` holds providers one
-            # level down. Accept the shorthand rather than fail on a plain mistake.
+            # 路径可能用 id 而不是序号指向序列项，先解析再断定这段不存在。
+            hit = self.entry(path)
+            if hit is not None:
+                path, noderaw = hit
+        if noderaw is None and path:
+            # 段名不是完整路径：加载器把每个插件的设置嵌在它自己的 `config:` 下，所以
+            # `llm-pi-ai` 的 providers 还深一层。容忍这种简写。
             for depth in (1, 2):
                 deeper = tuple(path) + ("config",) * depth
-                if deeper in self.nodes:
-                    noderaw = self.nodes[deeper]
+                hit = self._lookup(deeper)
+                if hit is not None:
+                    noderaw = hit
                     path = deeper
                     break
         node = noderaw
         if isinstance(node, YScalar) and node.empty and 0 <= node.line < len(self.lines):
-            # `providers: {}` parses as a mapping, but a section written as `x: {}`
-            # still ends its line above the children, so the first child we append
-            # would hang off nothing. Fold the braces into a plain header first.
+            # `providers: {}` 虽是映射，但写成 `x: {}` 的段在这一行就结束了，追加的
+            # 第一个子行会悬空。先把括号折成普通表头。
             body = self.lines[node.line].rstrip("\r\n")
             if body.rstrip().endswith(("{}", "[]")):
                 cut = body.rstrip()[:-2].rstrip()
                 self.lines[node.line] = cut + self.newline
                 self._resync()
-                node = self.nodes.get(tuple(path)) if path else self.root
+                node = self._lookup(path)
         if node is not None and isinstance(node, YMap) and not node.items:
             body = self.lines[node.line].rstrip("\r\n") if 0 <= node.line < len(self.lines) else ""
             if body.rstrip().endswith("{}"):
                 self.lines[node.line] = body.rstrip()[:-2].rstrip() + self.newline
                 self._resync()
-                node = self.nodes.get(tuple(path)) if path else self.root
+                node = self._lookup(path)
         if node is not None and not (isinstance(node, YScalar) and not node.empty):
             return True
         if not path:
             return self.root is not None
-        if path[:-1] and self.nodes.get(tuple(path[:-1])) is None:
-            # The parent section is missing too: create it first, then come back.
-            self.ensure_block(tuple(path[:-1]))
-        if path[:-1] and self.nodes.get(tuple(path[:-1])) is None:
-            return False
+        empty_file = not any(line.strip() for line in self.lines)
+        if not empty_file:
+            if path[:-1] and self._lookup(tuple(path[:-1])) is None:
+                # 父段也不在：先建父段再回来。
+                self.ensure_block(tuple(path[:-1]))
+            if path[:-1] and self._lookup(tuple(path[:-1])) is None:
+                return False
         if path[:-1]:
             indent = self.child_indent(tuple(path[:-1]))
         else:
-            # Top level: the root mapping's own column, not a child's.
+            # 顶层：用根映射自己的列，不是子节点的列。
             indent = self.root.indent if isinstance(self.root, YMap) else 0
         new_line = " " * indent + str(path[-1]) + ":"
-        if not path[:-1]:
+        if isinstance(self.root, YSeq) and path and isinstance(path[0], dict):
+            # 根是列表（DSH 的 profile 就是插件列表）：新插件只能以 `- id: x` 的形式
+            # 出现，否则整个文件会被读成映射，加载器直接失败。
+            parts = [str(step.get("id", step)) if isinstance(step, dict) else str(step)
+                     for step in path]
+            inputs = [raw.rstrip("\r\n") for raw in self.lines]
+            while inputs and not inputs[-1].strip():
+                inputs.pop()
+            body = ["- id: " + parts[0]]
+            body += [" " * (2 * index) + part + ":" for index, part in enumerate(parts[1:], start=1)]
+            inputs.extend(body)
+            text = self.newline.join(inputs) + self.newline
+        elif not self.lines or not any(line.strip() for line in self.lines):
+            # 空文件没有根可挂，把整条目完整拼出来。
+            parts = [str(step.get("id", step)) if isinstance(step, dict) else str(step)
+                     for step in path]
+            text = self.newline.join(
+                ["- id: " + parts[0]]
+                + [" " * (2 * index) + part + ":" for index, part in enumerate(parts[1:], start=1)]
+            ) + self.newline
+        elif not path[:-1]:
             inputs = [raw.rstrip("\r\n") for raw in self.lines]
             while inputs and not inputs[-1].strip():
                 inputs.pop()
@@ -248,8 +350,7 @@ class YamlDoc:
             parent = tuple(path[:-1])
             inputs = [raw.rstrip("\r\n") for raw in self.lines]
             if node is not None and _is_empty_body(inputs, node):
-                # `providers:` on its own line with nothing under it: keep the line
-                # and simply stop there, so the new child follows it directly.
+                # 独占一行的 `providers:` 下面什么都没有：保留这一行，新子项紧随其后。
                 pos = node.line + 1
             else:
                 pos = self.end_of(parent)
@@ -262,20 +363,21 @@ class YamlDoc:
         return False
 
     def insert(self, parent: tuple, block: list[str] | str | list[list[str]], where: str = "end") -> None:
-        """Insert a block of lines as children of ``parent``, re-indented to fit.
+        """把一段行插成 ``parent`` 的子项，按子项列重新缩进。
 
-        ``block`` may be a string (split on newlines, empty lines dropped) or a list
-        of lines. Lines are iterated as a list, never as characters — a list of
-        one-letter strings is flattened back into lines, never treated as columns.
+        ``block`` 可以是字符串（按行切、丢空行）或行列表。永远按行迭代，绝不按字符
+        —— 单字符列表会被拼回行，而不是被当成列。
         """
         block = _flatten(block)
+        # id 步骤只在开头解析一次：下面的展开、定位、缩进全用真实下标，而其中一步会
+        # 重新解析。
+        parent = self._real(parent) if any(isinstance(s, dict) for s in parent) else tuple(parent)
         if _needs_unfold(self, parent):
-            # An empty `providers:` next to a sibling would swallow the insert: the
-            # new lines would be appended after that sibling and read as its keys.
+            # 旁边有兄弟键的空 `providers:` 会吞掉插入内容：新行会追加到兄弟后面被读成
+            # 它的键。
             self.ensure_block(parent)
-        # Re-read after ensure_block: it reparses the document and replaces nodes,
-        # so a handle taken before it would still point at the pre-insert layout.
-        pnode = self.root if not parent else self.nodes.get(tuple(parent))
+        # ensure_block 之后要重新取节点：它重解析并替换了节点，之前的句柄还指向旧布局。
+        pnode = self._lookup(parent)
         if pnode is None:
             raise KeyError("no such path: " + ".".join(map(str, parent)))
         if isinstance(pnode, YScalar) and not pnode.empty:
@@ -285,25 +387,32 @@ class YamlDoc:
         self.lines[pos:pos] = [ln if ln.endswith("\n") else ln + self.newline for ln in shifted]
 
     def child_indent(self, path: tuple) -> int:
-        """The column where a NEW child of ``path`` belongs.
+        """``path`` 的新子项该放在哪一列。
 
-        Only mappings make useful parents: a sequence's "children" are its items
-        (whose column is tied to the dash), so asking a sequence for a child column
-        would hand back a key column and produce a mapping inside a list.
+        只有映射适合当父节点；序列的「子项」是列表项，列由 dash 决定。
         """
-        node = self.nodes.get(tuple(path)) if path else self.root
+        node = self._lookup(path)
+        if node is None and path:
+            hit = self.entry(path)
+            if hit is not None:
+                node = hit[1]
         if node is None:
             return 0
-        kids = list(node.children()) if isinstance(node, YMap) else []
+        children = list(node.children())
+        if isinstance(node, YSeq):
+            # 序列的子项是 `- id: x` 那类映射；它们的键列由 dash 位置决定。
+            maps = [c for c in children if isinstance(c, YMap)]
+            if maps:
+                return min(self._key_col(c) for c in maps)
+            return node.indent + 2
+        kids = [c for c in children if isinstance(c, YMap)]
         if kids:
-            # A child's ``indent`` is the column where its VALUE starts, which for a
-            # nested mapping is one level deeper than its key. New siblings belong
-            # at the key column, so read that from the child's own source line.
+            # 子节点的 ``indent`` 是它值所在的列，嵌套映射时比键深一层。新兄弟属于键列，
+            # 所以从子节点自己的源码行读。
             return min(self._key_col(k) for k in kids)
         return node.indent + 2
-
     def _key_col(self, node: YNode) -> int:
-        """The column of ``node``'s key in the source, for sibling alignment."""
+        """``node`` 的键在源码里的列，用于对齐兄弟。"""
         if 0 <= node.line < len(self.lines):
             body = self.lines[node.line].rstrip("\r\n")
             lead = len(body) - len(body.lstrip(" "))
@@ -313,8 +422,8 @@ class YamlDoc:
         return node.indent
 
     def text_of(self, path: tuple) -> list[str]:
-        """The exact source lines that belong to ``path`` (dedented to its column)."""
-        node = self.nodes.get(tuple(path))
+        """属于 ``path`` 的原始源码行（按它的列去缩进）。"""
+        node = self._lookup(path)
         if node is None:
             raise KeyError("no such path: " + ".".join(map(str, path)))
         first = node.line
@@ -331,14 +440,13 @@ class YamlDoc:
         return out
 
     def graft(self, parent: tuple, child_lines: list[str], prefix: list[str], where: str = "end") -> int:
-        """Insert one child entry into ``parent`` without reformatting it.
+        """往 ``parent`` 里塞一个子条目，不重排它。
 
-        ``child_lines`` is the (dedented) source of an existing node being moved or
-        copied; ``prefix`` is the text its first line should gain (``key:``). Both
-        are laid out at ``child_indent(parent)``, so a moved subtree keeps every
-        nested line exactly as it was, only shifted by a constant column count.
+        ``child_lines`` 是被搬动/复制的节点的（已去缩进）源码，``prefix`` 是首行要补的
+        ``key:``。整体排到 ``child_indent(parent)``，搬过去的子树只有统一平移。
         """
-        pnode = self.nodes.get(tuple(parent))
+        parent = self._real(parent)
+        pnode = self._lookup(parent)
         if pnode is None:
             raise KeyError("no such path: " + ".".join(map(str, parent)))
         indent = self.child_indent(parent)
@@ -351,14 +459,13 @@ class YamlDoc:
         pos = self.end_of(parent) if where == "end" else self.start_of_children(parent)
         self.lines[pos:pos] = [ln if ln.endswith("\n") else ln + self.newline for ln in block]
         if pnode.indent < indent:
-            # A parent with nothing but empty values (`providers:`) has no children
-            # to learn its open column from; record it so later edits agree.
+            # 只有空值的父节点（`providers:`）没有子项可参考列，记下来让后续编辑一致。
             pnode.indent = max(0, indent - 2)
         return pos
 
     def end_of(self, path: tuple) -> int:
-        """Index just past the last physical line that belongs to ``path``."""
-        node = self.root if not path else self.nodes.get(tuple(path))
+        """``path`` 最后一行之后的下标。"""
+        node = self._lookup(path)
         if node is None:
             raise KeyError("no such path: " + ".".join(map(str, path)))
         if isinstance(node, YScalar):
@@ -369,7 +476,7 @@ class YamlDoc:
         return last + 1
 
     def start_of_children(self, path: tuple) -> int:
-        node = self.root if not path else self.nodes.get(tuple(path))
+        node = self._lookup(path)
         if node is None:
             raise KeyError("no such path: " + ".".join(map(str, path)))
         kids = list(node.children())
@@ -378,18 +485,17 @@ class YamlDoc:
         return min(k.line if k.line >= 0 else node.line + 1 for k in kids)
 
     def delete_block(self, path: tuple) -> bool:
-        """Remove a whole key/entry and its subtree, plus a blank line we caused."""
+        """删掉整个键/条目及其子树，连同我们造成的空行。"""
         if not path:
             return False
-        node = self.nodes.get(tuple(path))
+        node = self._lookup(path)
         if isinstance(node, YScalar) and not node.empty:
             return False
-        first = _last_key_line(self, tuple(path))
+        first = _last_key_line(self, self._real(path))
         if first < 0:
             return False
-        # A section whose children were already deleted ("providers:" with nothing
-        # under it) still has to go: the parser made it an empty scalar, so fall
-        # back to the key line and take any deeper lines that trail it.
+        # 子项已删空的段（光秃秃的 `providers:`）也得删：解析器把它当空标量，于是退回
+        # 键行并带走尾随的更深行。
         last = _end_line(node) if node is not None and not isinstance(node, YScalar) else first
         last = max(last, first)
         if last < first:
@@ -399,7 +505,7 @@ class YamlDoc:
         self.lines, self.nodes, self.root = fresh.lines, fresh.nodes, fresh.root
         return True
 
-    # -- parsing -------------------------------------------------------
+    # -- 解析 ---------------------------------------------------------
     def _parse(self) -> None:
         rows: list[_Row] = []
         for i, raw in enumerate(self.lines):
@@ -455,7 +561,7 @@ def _parse_seq(doc: YamlDoc, rows: list[_Row], pos: int, indent: int, path: tupl
         item_path = path + (index,)
         probe = rest.strip()
         if probe and _MAP_ENTRY.match(probe):
-            # `- key: value` -> mapping starting on this line at column indent+2
+            # `- key: value` -> 这一行开始、列在 indent+2 的映射
             offset = indent + 1 + (len(rest) - len(rest.lstrip(" ")))
             node, pos = _parse_map(doc, rows, pos, offset, item_path, dash_line=row.line)
         else:
@@ -470,10 +576,10 @@ def _parse_seq(doc: YamlDoc, rows: list[_Row], pos: int, indent: int, path: tupl
 def _parse_map(
     doc: YamlDoc, rows: list[_Row], pos: int, indent: int, path: tuple, dash_line: int | None = None
 ) -> tuple[YMap, int]:
-    """Parse a block mapping whose keys sit at ``indent``.
+    """解析键都在 ``indent`` 列的块映射。
 
-    ``dash_line`` marks a mapping that opens on a sequence item's dash line: its
-    first key's text starts at ``indent`` although the line itself is indented less.
+    ``dash_line`` 标记起于列表项 dash 行的映射：第一个键的文本从 ``indent`` 开始，
+    尽管那一行本身的缩进更浅。
     """
     first_line = dash_line if dash_line is not None else rows[pos].line
     node = YMap(indent=indent, line=first_line)
@@ -483,21 +589,20 @@ def _parse_map(
         if on_dash:
             offset = indent
         else:
-            # A block mapping is a mapping only while every key sits at the SAME
-            # column: one dedent (or any deeper line that is not a value we
-            # already consumed) ends it.
+            # 块映射只在其所有键都同一列时成立：一次减缩进（或任何不属于已消费值的更深
+            # 行）就结束它。
             if row.indent != indent:
                 break
             offset = indent
         text = row.text[offset:]
         if _is_item(text) or not text.strip() or text.lstrip().startswith("#"):
-            # A dash, a blank line or a comment cell carries no key: reading it as
-            # one made an appended block land half a column off (`di: magpiee`).
+            # dash 行、空行、注释行都不含键：当成键读曾让追加的块错半列
+            # （`di: magpiee`）。
             break
         m = _MAP_ENTRY.match(text)
         if not m:
             break
-        dash_line = None  # only the first key shares the dash line
+        dash_line = None  # 只有第一个键与 dash 同行
         key = _unquote(m.group(1))
         child_path = path + (key,)
         after = text[m.end():]
@@ -507,14 +612,13 @@ def _parse_map(
             key_line = row.line
             pos, entry = _nested_or_empty(doc, rows, pos, offset, child_path)
             if not isinstance(entry, YScalar):
-                # The block's own line is the `key:` line, not its first child's,
-                # so spans (and therefore whole-block deletes) start where they must.
+                # 块自己的行是 `key:` 那一行，不是它第一个子行 —— 区间（以及整块删除）
+                # 才从该起的地方起。
                 entry.line = key_line
         else:
             entry, pos = _parse_scalar(rows, pos, value_col, child_path, offset)
         if block_scalar and isinstance(entry, YScalar):
-            # A block scalar owns every deeper line, so the mapping cannot resume
-            # until one dedents; skip them here rather than parsing them as keys.
+            # 块标量占有所有更深行，直到一次减缩进才结束；直接跳过，别当键解析。
             while pos < len(rows) and rows[pos].indent > offset:
                 pos += 1
         node.items[key] = entry
@@ -547,8 +651,7 @@ def _parse_scalar(rows: list[_Row], pos: int, value_col: int, path: tuple, inden
     if not value.strip():
         return YScalar(text="", line=row.line, indent=indent, start=len(row.text), end=len(row.text), empty=True), pos + 1
     if value.strip() == "{}":
-        # `providers: {}` is an empty mapping we can grow children into; treating it
-        # as a scalar would make the first insert fail on a perfectly normal file.
+        # `providers: {}` 是可以长子的空映射；当标量处理会让第一次插入在正常文件上失败。
         return YMap(indent=indent + 2, line=row.line), pos + 1
     if value.strip() == "[]":
         return YSeq(indent=indent, line=row.line), pos + 1
@@ -558,7 +661,7 @@ def _parse_scalar(rows: list[_Row], pos: int, value_col: int, path: tuple, inden
     return YScalar(text=value.strip(), line=row.line, indent=indent, start=start, end=end), pos + 1
 
 
-# --------------------------------------------------------------------------- helpers
+# --------------------------------------------------------------------------- 工具函数
 
 _QUOTES = ('"', "'")
 
@@ -571,7 +674,7 @@ def _unquote(key: str) -> str:
 
 
 def _split_comment(raw: str) -> tuple[str, str]:
-    """Split ``value   # comment`` respecting quotes; returns (value, comment)."""
+    """按引号规则切开 ``value   # comment``，返回 (值, 注释)。"""
     quote = None
     for i, ch in enumerate(raw):
         if quote:
@@ -600,7 +703,7 @@ def _reindent(block: list[str], indent: int) -> list[str]:
 
 
 def _flatten(block: list[str]) -> list[str]:
-    """Accept a line list or raw text; never iterate a string character by character."""
+    """接受行列表或原始文本；绝不按字符迭代字符串。"""
     if isinstance(block, str):
         return [line for line in block.splitlines() if line.strip()]
     out: list[str] = []
@@ -613,13 +716,11 @@ def _flatten(block: list[str]) -> list[str]:
 
 
 def _insert_position(doc: "YamlDoc", parent: tuple, where: str = "end") -> int:
-    """Where new children of ``parent`` may be spliced in.
+    """``parent`` 的新子项可以插在哪里。
 
-    ``end_of`` stops at the close of the last child, which is the wrong place twice:
-    a blank line there belongs to the gap between the parent and its sibling, and a
-    sibling's own key line is even worse — pushing it under our block moves it into
-    the parent. Both cases step back to just after the last child that is really
-    there, so the sibling (and its blank line) stays put.
+    ``end_of`` 停在最后一个子项结束处，这里有两种情况会错：那里的空行属于父与兄弟之间
+    的间隔；那里若是兄弟的键行更糟 —— 把它顶下去就变成父的子项。两种都退回「真正在的
+    最后一行之后」，让兄弟和它的空行原地不动。
     """
     if where != "end":
         return doc.start_of_children(parent)
@@ -628,13 +729,11 @@ def _insert_position(doc: "YamlDoc", parent: tuple, where: str = "end") -> int:
         return pos
     here = doc.lines[pos].rstrip("\r\n")
     if not here.strip():
-        # A blank line closes the block for YAML purposes; splicing after it would
-        # give our child to whatever mapping comes next instead of to the parent.
+        # 空行在 YAML 里就结束了这个块；插在它后面会把子项送给后面的映射而不是父节点。
         return _last_line_index(doc, parent) + 1
-    # Splicing right before this line is only safe while it belongs to the parent.
-    # A line indented at or left of the parent's own column is its sibling: adding
-    # a line above it would push it down, and it would then read as a child.
-    pnode = doc.root if not parent else doc.nodes.get(tuple(parent))
+    # 只有这一行属于父节点时，插在它前面才安全。缩进不大于父列的键是兄弟：在它上面加行
+    # 会把它顶下去，从而被读成子项。
+    pnode = doc._lookup(tuple(parent))
     pcol = pnode.indent if pnode is not None and not isinstance(pnode, YScalar) else -1
     if len(here) - len(here.lstrip(" ")) <= pcol:
         return _last_line_index(doc, parent) + 1
@@ -642,14 +741,12 @@ def _insert_position(doc: "YamlDoc", parent: tuple, where: str = "end") -> int:
 
 
 def _last_key_line(doc: "YamlDoc", path: tuple) -> int:
-    """The physical line that holds the ``key:`` for ``path`` (-1 if it has none).
+    """``path`` 的 ``key:`` 所在的物理行（没有则 -1）。
 
-    ``YNode.line`` is the key line for maps and sequences, but for an *empty*
-    scalar produced by a bare ``key:`` header it can point at the header while
-    ``end``/``start`` stay on the value column, so callers that delete a block
-    must not trust it blindly. This helper reconciles the two.
+    ``YNode.line`` 对映射与序列就是键行，但对光秃秃 ``key:`` 产生的空标量，它可能指向
+    表头而 ``start``/``end`` 还停在值列，所以删块的调用方不能盲信它。这里把两者对齐。
     """
-    node = doc.nodes.get(tuple(path))
+    node = doc._lookup(tuple(path))
     if node is None:
         return -1
     if isinstance(node, YScalar) and not node.empty:
@@ -658,8 +755,7 @@ def _last_key_line(doc: "YamlDoc", path: tuple) -> int:
     ln = node.line
     if 0 <= ln < len(doc.lines) and doc.lines[ln].lstrip().startswith(want + ":"):
         return ln
-    # Node line drifted (a block was re-parsed after edits): scan upward for the
-    # nearest line at the key's own indentation that spells the key.
+    # 节点行号漂了（编辑后块被重解析过）：向上扫最近一个拼着该键的行。
     for i in range(ln, max(-1, ln - 64), -1):
         if 0 <= i < len(doc.lines):
             body = doc.lines[i]
@@ -670,8 +766,8 @@ def _last_key_line(doc: "YamlDoc", path: tuple) -> int:
 
 
 def _last_line_index(doc: "YamlDoc", path: tuple) -> int:
-    """Index of the last physical line that belongs to ``path``."""
-    node = doc.root if not path else doc.nodes.get(tuple(path))
+    """属于 ``path`` 的最后一个物理行的下标。"""
+    node = doc._lookup(tuple(path))
     if node is None:
         raise KeyError("no such path: " + ".".join(map(str, path)))
     if isinstance(node, YScalar):
@@ -683,7 +779,7 @@ def _last_line_index(doc: "YamlDoc", path: tuple) -> int:
 
 
 def _is_empty_body(lines: list[str], node: "YNode") -> bool:
-    """Is the line at ``node.line`` a header with no body under it?"""
+    """``node.line`` 那一行是否是个下面没内容的表头？"""
     if node.line < 0 or node.line >= len(lines):
         return False
     for line in lines[node.line + 1:]:
@@ -694,14 +790,14 @@ def _is_empty_body(lines: list[str], node: "YNode") -> bool:
 
 
 def _needs_unfold(doc: "YamlDoc", parent: tuple) -> bool:
-    """Does ``parent`` have no block body of its own?
+    """``parent`` 是否没有自己的块体？
 
-    True for an inline ``{}``/``[]`` and for a section whose next line belongs to a
-    sibling. Both need a body before a child can be inserted at "end of parent".
+    行内 ``{}``/``[]`` 和「下一行属于兄弟」的段都算。两种都要先补出块体，才能往
+    「父节点末尾」插子项。
     """
-    if parent and doc.nodes.get(tuple(parent)) is None:
-        return False  # missing entirely; ensure_block creates the ancestors
-    node = doc.root if not parent else doc.nodes.get(tuple(parent))
+    if parent and doc._lookup(tuple(parent)) is None:
+        return False  # 完全不存在；祖先交给 ensure_block 建
+    node = doc._lookup(tuple(parent))
     if node is None or isinstance(node, YScalar):
         return False
     if node.line >= 0 and node.line < len(doc.lines):

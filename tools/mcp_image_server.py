@@ -61,7 +61,7 @@ def read_key():
         return k
     path = os.path.join(ROOT, "data", "client_keys.txt")
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#"):

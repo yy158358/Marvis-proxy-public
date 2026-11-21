@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """对外 OpenAI 兼容层：/v1/models、/v1/chat/completions。"""
 import json
+import socket
 import sys
 import time
+import urllib.error
 import uuid
 
 from cap import chat as chat_cap
@@ -10,6 +12,28 @@ from cap import guard as guard_cap
 from core.store import iso, now
 
 PASS_KEYS = chat_cap.PASS_KEYS + ("session_id",)
+
+# 网络瞬断（不是上游业务错误）：本机到 yybadaccess.3g.qq.com 的 TCP 建连被拒/超时。
+# 实测 2026-11-21 06:30 与 07:04 两段各持续 3~4 分钟，期间所有请求都是
+# WinError 10061（目标计算机积极拒绝），网络恢复后立刻正常。
+# 这类错误跟账号无关，不能换号、不能罚号，只能原地退避重试。
+NET_ERRNOS = (10061, 10060, 10051, 10065, 10054, 10053)
+NET_RETRY_MAX = 4          # 首次 + 3 次重试
+NET_RETRY_DELAYS = (1.0, 2.0, 4.0)
+
+
+def _is_net_error(exc):
+    """判断异常是不是「连不上上游」的网络层错误（可重试）。"""
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, BaseException):
+            return _is_net_error(reason)
+        return True
+    if isinstance(exc, (ConnectionError, socket.timeout, TimeoutError)):
+        return True
+    return getattr(exc, "errno", None) in NET_ERRNOS
 
 
 class ApiError(Exception):
@@ -349,6 +373,16 @@ def chat(ctx, body, client_key):
             pool.release(acc["id"])
             sys.stderr.write("[upstream] %s: %s | body_keys=%s\n" % (type(e).__name__, e, sorted(k for k in body)))
             sys.stderr.flush()
+            if _is_net_error(e) and attempt < NET_RETRY_MAX:
+                # 网络瞬断：账号本身没问题，原地退避重试，不换号、不罚号
+                delay = NET_RETRY_DELAYS[min(attempt - 1, len(NET_RETRY_DELAYS) - 1)]
+                sys.stderr.write("[net] 上游不可达，%.1fs 后重试（%d/%d）\n"
+                                 % (delay, attempt, NET_RETRY_MAX - 1))
+                sys.stderr.flush()
+                time.sleep(delay)
+                acc = pool.pick(client_key, session_id, respect_limit=True) or acc
+                pool.acquire(acc["id"])
+                continue
             raise ApiError(502, "连接上游失败：%s" % e, "upstream_unreachable", "server_error")
 
         if status == 200:

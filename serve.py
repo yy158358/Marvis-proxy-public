@@ -12,6 +12,7 @@
   POST /admin/login/exchange
   GET  /admin/accounts
   POST /admin/accounts/<id>/<action>
+  GET  /admin/routing                    （路由视角：候选号 / 负载 / 落点）
   GET  /admin/usage
   POST /admin/cleanup
 """
@@ -34,9 +35,11 @@ import api.admin as admin_api
 import api.anthropic as anthropic_api
 import api.keys as keys_api
 import api.openai as openai_api
+import api.wire as wire_api
 from cap import wallet as wallet_cap
 from core.backup import make_backup, start_backup_thread
 from core.pool import Pool
+from core.version import SERVER_ID, VERSION
 from core.store import Store
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -160,12 +163,40 @@ def setup_logging():
 # 这是谁、怎么说、有哪些模型，不用去读我们的 config.json，也不用在客户端重复配置。
 PROVIDER_DEFAULT_NAME = "Marvis Proxy"
 PROVIDER_DEFAULT_ID = "marvis-proxy"
-PROVIDER_VERSION = "0.2.0"
+#: 版本号只有一个来源（core/version.py）。以前三处各写各的（0.2.0 / 0.1.0 /
+#: marvis-proxy/0.1），/provider 和 /admin/health 报的号对不上。
+PROVIDER_VERSION = VERSION
 
 
 def provider_name(ctx):
     cfg = (ctx or {}).get("config") or {}
     return cfg.get("provider_name") or PROVIDER_DEFAULT_NAME
+
+
+def _endpoints(base):
+    """``/v1/provider`` 的 endpoints 清单。
+
+    以前这里是手写的 9 个口，而 ``api/wire.py`` 里另有一份 ``describe()`` 列着
+    wire 的 8 个口 —— 那份**全树零调用**，等于白写：客户端看 /v1/provider 永远
+    不知道有 /v1/wire/*。现在两边合并，wire 的口由它自己声明，加口不用改两处。
+    """
+    out = {
+        "health": base + "/health",
+        "provider": base + "/v1/provider",
+        "models": base + "/v1/models",
+        "chat": base + "/v1/chat/completions",
+        "messages": base + "/v1/messages",
+        "count_tokens": base + "/v1/messages/count_tokens",
+        "images": base + "/v1/images/generations",
+        "image_task": base + "/v1/images/tasks/{id}",
+        "files": base + "/files/{name}",
+    }
+    try:
+        for name, path in wire_api.describe().items():
+            out[name] = base + path
+    except Exception:                                  # 描述失败不该拖垮 /v1/provider
+        pass
+    return out
 
 
 def provider_block(ctx, full=False):
@@ -188,17 +219,7 @@ def provider_block(ctx, full=False):
         "features": {"chat": True, "stream": True, "tools": True, "vision": True,
                      "images": True, "anthropic": True, "count_tokens": True,
                      "reasoning": True, "aliases": True},
-        "endpoints": {
-            "health": base + "/health",
-            "provider": base + "/v1/provider",
-            "models": base + "/v1/models",
-            "chat": base + "/v1/chat/completions",
-            "messages": base + "/v1/messages",
-            "count_tokens": base + "/v1/messages/count_tokens",
-            "images": base + "/v1/images/generations",
-            "image_task": base + "/v1/images/tasks/{id}",
-            "files": base + "/files/{name}",
-        },
+        "endpoints": _endpoints(base),
         "model_ids": ids,
     }
     if full:
@@ -218,7 +239,10 @@ def load_config():
     path = os.path.join(ROOT, "config.json")
     cfg = {}
     if os.path.isfile(path):
-        with open(path, encoding="utf-8") as f:
+        # utf-8-sig：Windows 记事本 / PowerShell 存 UTF-8 会带 BOM，
+        # 用普通 utf-8 读会在最前面留个 \ufeff，json.load 直接报
+        # "Expecting value: line 1 column 1"。带 sig 能自动剥掉，无 BOM 时行为不变。
+        with open(path, encoding="utf-8-sig") as f:
             cfg = json.load(f)
     for k, env in (("host", "MARVIS_HOST"), ("port", "MARVIS_PORT"), ("data_dir", "MARVIS_DATA_DIR"),
                    ("admin_token", "MARVIS_ADMIN_TOKEN"), ("image_workers", "MARVIS_IMAGE_WORKERS")):
@@ -247,7 +271,7 @@ def load_models():
         mt = -1.0
     if _MCACHE["obj"] is not None and mt == _MCACHE["mtime"]:
         return _MCACHE["obj"]
-    with open(path, encoding="utf-8") as f:
+    with open(path, encoding="utf-8-sig") as f:
         obj = json.load(f)
     _MCACHE["mtime"], _MCACHE["obj"] = mt, obj
     return obj
@@ -356,7 +380,7 @@ def start_cleaner(ctx):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "marvis-proxy/0.1"
+    server_version = SERVER_ID + "/" + VERSION
 
     # ---------- 基础工具 ----------
     _SECRET_RX = re.compile(r"(?i)\b(key|api_key|api-key|token|access_token)=([^&\s\"']+)")
@@ -368,6 +392,12 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), line))
 
     def _json(self, status, obj, extra_headers=None):
+        # 回响应之前先把没被读走的请求体吃掉。
+        # 有些分支（备份、清理、key 动作）根本不关心 body，
+        # 不吃的话 body 会留在 socket 缓冲里，keep-alive 连接的下一个请求
+        # 就从 body 中间开始解析 —— 表现为莫名其妙的
+        # "Unsupported method ('{}GET')" 501。
+        self._drain_body()
         raw = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -382,7 +412,33 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    def _drain_body(self):
+        """把还没读过的请求体读掉但不解。
+
+        只在「这个分支压根没调 _body()」时才有东西可吃；
+        读过了就直接返回，不会把下一个请求的字节吞掉。
+        """
+        if getattr(self, "_body_read", False):
+            return
+        self._body_read = True
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return
+        if n <= 0:
+            return
+        limit = int(self.ctx["config"].get("max_body_bytes") or 0)
+        if limit > 0 and n > limit:
+            # 超大 body 直接不读，连接会在这里被关掉
+            self.close_connection = True
+            return
+        try:
+            self.rfile.read(n)
+        except Exception:
+            self.close_connection = True
+
     def _body(self):
+        self._body_read = True
         n = int(self.headers.get("Content-Length") or 0)
         if n <= 0:
             return {}
@@ -401,6 +457,20 @@ class Handler(BaseHTTPRequestHandler):
         ok, ident = keys_api.gate(self.ctx, self.headers)
         self.client_ok = ok
         return ident
+
+    def _raw_key(self):
+        """这次请求头里带的明文 key（没带就是空串）。
+
+        只给「接线」用：apply 要把一把真能用的 key 写进 agent 的配置文件，
+        而库里只存 sha256，拿不回明文，所以只能从请求头里取。
+        """
+        token = (self.headers.get("X-API-Key") or "").strip()
+        if token:
+            return token
+        auth = self.headers.get("Authorization") or ""
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return auth.strip()
 
     def _deny_key(self):
         return self._json(401, {"error": {
@@ -439,6 +509,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- 路由 ----------
     def do_GET(self):
+        self._body_read = False
         refresh_models(self.ctx)
         u = urlparse(self.path)
         path = unquote(u.path)
@@ -492,6 +563,21 @@ class Handler(BaseHTTPRequestHandler):
                 # 给「新接进来的 agent 工具」一个自描述入口：不用读我们的配置文件，
                 # 打一下就知道这是谁、支持什么、有哪些模型、key 怎么给。
                 return self._json(200, provider_block(self.ctx, full=True))
+            if path.startswith("/v1/wire/"):
+                # 只读：装了哪些 agent、各自现在指向谁、我们改过哪些、模型清单、用量。
+                # 和 /v1/provider 一样不要 key —— 它只能看到路径、模型名和用量计数，
+                # 看不到任何一个可用 key（/v1/wire/keys 只回前缀）。
+                action = path[len("/v1/wire/"):]
+                if action in wire_api.WRITE_ACTIONS:
+                    return self._json(405, {"ok": False, "code": "method_not_allowed",
+                                            "error": "写操作请用 POST /v1/wire/" + action})
+                if action in wire_api.ADMIN_ACTIONS and not self._admin_ok():
+                    return self._json(401, {"ok": False, "code": "admin_required",
+                                            "error": "这块要 admin_token（%s）" % action})
+                qs = parse_qs(u.query)
+                body = {k: (v or [None])[0] for k, v in qs.items()}
+                status, payload = wire_api.handle(self.ctx, action, body)
+                return self._json(status, payload)
             if path.startswith("/v1/images/tasks/"):
                 # 建过 key 之后这里也要校验（可用 ?key= 传，方便直接贴 status_url）
                 q_ok = self._key_from_query(u.query)
@@ -536,6 +622,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._admin_ok():
                     return self._json(401, {"error": "admin_token 不对"})
                 return self._json(200, admin_api.accounts(self.ctx))
+            if path == "/admin/routing":
+                # 路由视角：候选号 / 负载 / 最后一轮落点。控制台画拓扑图用。
+                if not self._admin_ok():
+                    return self._json(401, {"error": "admin_token 不对"})
+                return self._json(200, admin_api.routing(self.ctx))
             if path == "/admin/usage":
                 if not self._admin_ok():
                     return self._json(401, {"error": "admin_token 不对"})
@@ -555,10 +646,56 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(500, {"error": "internal: %s" % e})
 
     def do_POST(self):
+        self._body_read = False
         refresh_models(self.ctx)
         u = urlparse(self.path)
         path = unquote(u.path)
         try:
+            if path in ("/v1/wire/apply", "/v1/wire/rollback"):
+                # 会重写 ~/.claude、~/.codex、~/.dsh、~/.zcode 下的配置。
+                #
+                # 准入判据是「是不是这台机器的主人」，不是「库里有没有 API key」。
+                # 这两件事要分开：
+                #   · admin_token 是主人的凭证，管「能不能改这台机器上的东西」——
+                #     /admin/* 和这里都该用它（留空 = 本机免鉴权，与 require_admin 一致）。
+                #   · API key 是对话客户端的凭证，管「能不能用这个代理说话」。
+                # 早期这里错误地要求「库里至少一把 key」，等于要求主人先给自己发一张
+                # 客人用的通行证：刚装完 agent 想一键接入的人，被 400 挡在门外，
+                # 而他要做的事（让 agent 能用）本来就跟 API key 无关。
+                #
+                # key 仍然可以带（带了就会写进配置）；不带也能接，只是配置里留个
+                # 占位符，见 api/wire.py 的 gateway_key_of。
+                if self.ctx["config"].get("admin_token"):
+                    if not self._admin_ok():
+                        return self._json(401, {
+                            "ok": False, "code": "admin_required",
+                            "error": "接线会改本机的 agent 配置，要 admin_token"
+                                     "（配置里配了 admin_token 就必须带 X-Admin-Token）",
+                        })
+                self._client_key()
+                # 库里一把 key 都没有时 gate() 会放行（identity 为空），这是有意的：
+                # 此时配置里没有可用的 key，agent 第一次对话会拿到 401 并提示建 key，
+                # 比在接线这一步就失败更好定位。
+                if not getattr(self, "client_ok", True):
+                    return self._deny_key()
+                body = self._body()
+                # 把这次鉴权通过的那把 key 记进 ctx，供 wire 写配置时用
+                # （请求体没显式给 key 时，写进去的就是它，不会是别的值）。
+                self.ctx["wire_key"] = self._raw_key()
+                try:
+                    status, payload = wire_api.handle(self.ctx, path.rsplit("/", 1)[-1], body)
+                finally:
+                    self.ctx.pop("wire_key", None)
+                return self._json(status, payload)
+            if path.startswith("/v1/wire/"):
+                # 只读动作走 POST 也认（前端统一用 POST 带 body，省得拼 query）。
+                action = path[len("/v1/wire/"):]
+                if action in wire_api.READ_ACTIONS:
+                    if action in wire_api.ADMIN_ACTIONS and not self._admin_ok():
+                        return self._json(401, {"ok": False, "code": "admin_required",
+                                                "error": "这块要 admin_token（%s）" % action})
+                    return self._json(200, wire_api.handle(self.ctx, action, self._body())[1])
+                return self._json(404, {"ok": False, "error": "not found: " + path})
             if path == "/v1/chat/completions":
                 return self._chat()
             if path == "/v1/messages":
@@ -736,8 +873,11 @@ class Handler(BaseHTTPRequestHandler):
         ext = os.path.splitext(full)[1].lower()
         etag = '"%x-%x"' % (st.st_size, int(st.st_mtime))
         last_mod = self.date_time_string(int(st.st_mtime))
-        # html 每次协商（改了立刻生效）；静态资源给 1 小时，靠 ETag 兜底
-        cache = "no-cache" if ext == ".html" else "public, max-age=3600"
+        # 控制台前端在开发期改得频繁，而且没有构建步骤自动改文件名做 cache busting。
+        # 如果给 css/js 上 max-age，浏览器会继续用旧样式去配新 HTML —— 表现就是
+        # 「页面完全没有样式」，非常难认。所以一律 no-cache：每次都用 ETag 协商，
+        # 没改就 304（几乎零流量），改了立刻生效。
+        cache = "no-cache"
 
         if self._not_modified(etag, int(st.st_mtime)):
             self.send_response(304)
@@ -899,8 +1039,21 @@ def main():
         _ac = autoconfig.ensure(cfg, ctx)
         if _ac["wrote"]:
             print("已自动写入 %s -> %s" % (", ".join(_ac["wrote"]), ctx["data_dir"]))
-        if _ac["qimei36"]:
-            print("设备指纹 qimei36 = %s" % _ac["qimei36"])
+        # appKey 要说清来路：内置值和探测值对用户的意义完全不同 —— 内置值是所有人
+        # 共用的常量，上游一换就全体失效，用户得知道该去哪儿改。
+        _src = _ac.get("appkey_source")
+        if _src == "builtin":
+            print("QIMEI 应用标识 appKey = %s（内置默认值，非本机探测）" % _ac["appkey"])
+            print("  这是所有用户共用的常量。若上游已更换，用环境变量 MARVIS_QIMEI_APPKEY 覆盖。")
+        elif _src == "detected":
+            print("QIMEI 应用标识 appKey = %s（从本机客户端探测）" % _ac["appkey"])
+        elif _src == "cached":
+            print("QIMEI 应用标识 appKey = %s（读自 data/%s）" % (_ac["appkey"], autoconfig.APPKEY_FILE))
+        elif _src == "env":
+            print("QIMEI 应用标识 appKey = %s（来自环境变量）" % _ac["appkey"])
+        _q = _ac.get("qimei36")
+        if _q:
+            print("设备指纹 qimei36 = %s" % _q)
         else:
             print("设备指纹 qimei36 未取得（见上方提示）")
     except Exception as e:

@@ -9,6 +9,12 @@ rem (copying marvis.db under WAL would lose recent writes), packed with
 rem config.json / models.json into backups\marvis-YYYYmmdd-HHMMSS.tar.gz.
 rem safe to run while serve.py is running.
 rem NOTE: keep this file pure ASCII (see run.bat header).
+rem
+rem NO PAUSE BY DEFAULT. This script is called by scheduled tasks, by
+rem run.bat, and by other scripts; a trailing "pause" would hang them all
+rem forever with no window to press a key in. Double-click users still get
+rem a pause because conhost keeps the window only when we ask for it:
+rem set MARVIS_BACKUP_PAUSE=1 to force it.
 rem ================================================================
 setlocal EnableExtensions
 cd /d "%~dp0"
@@ -27,7 +33,7 @@ if not defined PY (
 if not defined PY (
   echo [ERROR] Python not found.
   echo         Install Python 3.8+ from python.org with "Add python.exe to PATH".
-  if "%~1"=="" pause
+  if "%~1"=="" if defined MARVIS_BACKUP_PAUSE pause
   exit /b 1
 )
 
@@ -38,7 +44,9 @@ if not "%RC%"=="0" (
   echo.
   echo [ERROR] backup failed, exit code %RC%
 )
-if "%~1"=="" (
+rem  only pauses when MARVIS_BACKUP_PAUSE is set; otherwise scheduled
+rem  tasks and run.bat callers would hang forever on a keypress.
+if "%~1"=="" if defined MARVIS_BACKUP_PAUSE (
   echo.
   pause
 )
