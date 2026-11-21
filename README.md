@@ -423,6 +423,4 @@ detail      : {'ctypes': True, 'pure': False, 'node': False, 'local': False}
 
 ## 许可
 
-见 [LICENSE](LICENSE)。除 `tools/bionic_shim/` 下那几个 Android 垫片库
-（`libc` / `libm` / `libdl` / `libandroid` / `libjni_stub` 是空壳，`libqimei_patched.so`
-是给 glibc 环境用的改写版）之外，本项目不附带上游的二进制文件。
+见 [LICENSE](LICENSE)
