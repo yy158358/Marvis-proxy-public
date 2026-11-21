@@ -1,0 +1,23 @@
+# 统一行尾：仓库里一律 LF，检出时也不做转换。
+#
+# 起因：之前没这个文件、而机器上 core.autocrlf = true，于是
+# Windows 上检出成 CRLF、add 时又转回 LF —— 只要动过一个文件，
+# git status 里就会冒出一堆「全文件修改」，实际内容一个字没变。
+# 固定成 LF 之后，改没改一眼就能看出来。
+* text=auto eol=lf
+
+# Windows 批处理保留 CRLF：cmd.exe 对 LF 结尾的兼容不可靠
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制，别做任何转换
+*.so   binary
+*.woff2 binary
+*.woff binary
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.db   binary
+*.zip  binary
+*.gz   binary
