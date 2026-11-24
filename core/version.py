@@ -11,7 +11,7 @@
 """
 
 #: 改了行为就动它。语义版本，``/provider``、``/admin/health``、``Server`` 头三处同源。
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 #: HTTP ``Server:`` 头里的产品名。用 ``名字/版本`` 的常规形式。
 SERVER_ID = "marvis-proxy"
