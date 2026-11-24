@@ -216,6 +216,48 @@ def _model_budget(models, slot):
     return int(models.get("reasoning_budget_default") or 0)
 
 
+def _model_caps(models, slot):
+    """该槽位的能力表（models.json 的 caps）。找不到时返回空 dict，调用方按「支持」处理。"""
+    for a in models.get("aliases") or []:
+        if a.get("slot") == slot and isinstance(a.get("caps"), dict):
+            return a["caps"]
+    return {}
+
+
+EFFORT_LEVELS = ("none", "low", "medium", "high", "max")
+
+
+def _normalize_effort(config, raw):
+    """把客户端给的思考档位收成上游认的五个值之一。
+
+    2026-11-24 实测 deepseek-v4-1-flash-261017（其余 flash 同）：
+      · 不带 reasoning_effort     → 上游照样推理，但把整段推理写进 delta.content
+      · reasoning_effort=none     → 同上（696 字全混进正文）
+      · reasoning_effort=off      → 上游直接 502 invalid parameter（它不认 off）
+      · low / medium / high / max → delta.reasoning_content 正常分离
+
+    也就是说「关掉思考」这件事上游做不到：关只会让它从后门（content）溜出来，
+    客户端只能当正文渲染，用户就看到一大段「让我先一步一步来…」。
+    所以 off / none / 空 一律抬到 reasoning_effort_floor（默认 low）：
+    对客户端是「尽量少想」，对上游是「至少给个档位，把思考分到 reasoning 通道」。
+    """
+    floor = str(config.get("reasoning_effort_floor") or "low").strip().lower()
+    if floor not in EFFORT_LEVELS or floor == "none":
+        floor = "low"
+    if raw is None:
+        return floor
+    v = str(raw).strip().lower()
+    if not v or v in ("off", "none", "false", "0", "no", "disabled"):
+        return floor
+    if v in EFFORT_LEVELS:
+        return v
+    if v in ("xhigh", "x-high", "highest", "ultra", "maximum"):
+        return "max"
+    if v in ("minimal", "minimum", "min", "tiny", "least"):
+        return "low"
+    return floor
+
+
 def _decide_budget(config, models, slot, messages, body, kw):
     """返回 (目标 max_tokens, 是否调整过, 原因)。三层：分档下限 / 事前抬预算 / 客户端未给"""
     cur = int(kw.get("max_tokens") or kw.get("max_completion_tokens") or 0)
@@ -272,6 +314,15 @@ def chat(ctx, body, client_key):
     want_stream = bool(body.get("stream"))
     session_id = body.get("user") or body.get("session_id") or ""
     kw = dict((k, body.get(k)) for k in PASS_KEYS if k in body and k != "session_id")
+    # 思考档位收口：不传、传 none、传 off 都会让上游把整段推理写进正文（详见 _normalize_effort）。
+    # 只对支持推理的槽位做 —— hy3 / 视觉档传了会被上游当非法参数。
+    if _model_caps(models, slot).get("reasoning", True):
+        _raw_effort = body.get("reasoning_effort")
+        if _raw_effort is None:
+            _raw_effort = body.get("reasoningEffort")   # 有的客户端用驼峰
+        kw["reasoning_effort"] = _normalize_effort(config, _raw_effort)
+    else:
+        kw.pop("reasoning_effort", None)
     # 上游只认 max_tokens；OpenAI 新字段 max_completion_tokens 直接传会被 400（code 3000101）
     if kw.get("max_completion_tokens") is not None and not kw.get("max_tokens"):
         kw["max_tokens"] = kw.pop("max_completion_tokens")

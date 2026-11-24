@@ -22,7 +22,8 @@
     transport: stdio
     command: py
     args: ['-3', 'tools/mcp_image_server.py']
-    cwd: E:/deepseek-work/dsh-marvis-proxy/marvis-proxy
+    # ↓ 改成你自己的 marvis-proxy 目录。正斜杠或双反斜杠都行，YAML 里别用单个反斜杠。
+    cwd: D:/code/marvis-proxy
     toolCallTimeoutMs: 600000
     env:
       MARVIS_PROXY_BASE: http://127.0.0.1:8088

@@ -7,6 +7,7 @@
   "http_timeout": 180,
   "sse_idle_timeout": 180,
   "reasoning_floor_tokens": 0,
+  "reasoning_effort_floor": "low",
   "image_workers": 3,
   "image_poll_interval": 3,
   "image_timeout": 480,

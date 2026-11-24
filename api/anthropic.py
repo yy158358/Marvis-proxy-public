@@ -128,6 +128,31 @@ def tool_choice(body):
     return None
 
 
+def _effort_from_thinking(body):
+    """Anthropic 的 thinking 块 → 上游的 reasoning_effort。返回 None 表示客户端没表态。
+
+    Anthropic 的 extended thinking 和 OpenAI 的 reasoning_effort 是同一件事的两套写法。
+    不翻译过去，上游就不知道要分离思考，会把整段推理写进正文（见 api/openai.py 的
+    _normalize_effort 里那段实测记录）。这里只做翻译，「没表态时至少给 low」的兜底
+    交给 chat() 里统一收口，不在这里重复第二套规则。
+    """
+    th = body.get("thinking")
+    if th is True:                      # 有的客户端直接写 thinking: true
+        return "medium"
+    if not isinstance(th, dict):
+        return None
+    if th.get("type") not in (None, "enabled"):
+        return None                     # type == "disabled"：交给兜底
+    budget = th.get("budget_tokens")
+    if isinstance(budget, int) and budget > 0:
+        if budget >= 8192:
+            return "high"
+        if budget >= 2048:
+            return "medium"
+        return "low"
+    return "medium"                     # 只说 enabled、不给预算
+
+
 def build_kwargs(body):
     kw = {}
     for k_src, k_dst in (("max_tokens", "max_tokens"), ("temperature", "temperature"),
@@ -136,6 +161,9 @@ def build_kwargs(body):
             kw[k_dst] = body[k_src]
     if body.get("stop_sequences"):
         kw["stop"] = body["stop_sequences"]
+    eff = _effort_from_thinking(body)
+    if eff:
+        kw["reasoning_effort"] = eff
     return kw
 
 
@@ -231,10 +259,11 @@ def messages(ctx, body, client_key="", t0=None):
         return ("json", to_anthropic(obj, name, est, with_thinking=bool(body.get("thinking"))))
 
     _, _name, _slot, acc, resp, meta = result
-    return ("stream", stream_events(ctx, name, acc, resp, est, _slot, t0))
+    return ("stream", stream_events(ctx, name, acc, resp, est, _slot, t0,
+                                    with_thinking=bool(body.get("thinking"))))
 
 
-def stream_events(ctx, name, acc, resp, input_tokens=0, slot="", t0=None):
+def stream_events(ctx, name, acc, resp, input_tokens=0, slot="", t0=None, with_thinking=False):
     """把 OpenAI chunk 流翻译成 Anthropic 事件流（yield 完整 SSE 文本块）。"""
 
     def ev(event, data):
@@ -247,9 +276,13 @@ def stream_events(ctx, name, acc, resp, input_tokens=0, slot="", t0=None):
         "usage": {"input_tokens": input_tokens, "output_tokens": 0}}})
 
     text_open = False
-    text_index = 0
+    # 客户端要了 extended thinking 就把 index 0 留给 thinking 块，正文往后挪一格；
+    # 没要就保持原样（thinking 内容照样丢弃，免得客户端认不出块类型报错）
+    think_open = False
+    THINK_INDEX = 0
+    text_index = 1 if with_thinking else 0
     tool_state = {}          # oai index -> {"block": i, "id", "name", "pending_args", "opened"}
-    next_index = 1
+    next_index = text_index + 1
     stop_reason = None
     usage = {}
     chars = 0
@@ -272,8 +305,21 @@ def stream_events(ctx, name, acc, resp, input_tokens=0, slot="", t0=None):
                 d = ch.get("delta") or {}
                 if ch.get("finish_reason"):
                     stop_reason = STOP_MAP.get(ch["finish_reason"], "end_turn")
+                # 上游分离出来的思考：客户端要了 extended thinking 就发 thinking_delta（永远在正文之前）
+                rt = d.get("reasoning_content")
+                if rt and with_thinking:
+                    if not think_open:
+                        yield ev("content_block_start", {"type": "content_block_start", "index": THINK_INDEX,
+                                                         "content_block": {"type": "thinking", "thinking": "",
+                                                                           "signature": ""}})
+                        think_open = True
+                    yield ev("content_block_delta", {"type": "content_block_delta", "index": THINK_INDEX,
+                                                     "delta": {"type": "thinking_delta", "thinking": rt}})
                 text = d.get("content")
                 if text:
+                    if think_open:      # 正文开始了，思考块先收尾
+                        yield ev("content_block_stop", {"type": "content_block_stop", "index": THINK_INDEX})
+                        think_open = False
                     chars += len(text)
                     if not text_open:
                         yield ev("content_block_start", {"type": "content_block_start", "index": text_index,
@@ -295,6 +341,9 @@ def stream_events(ctx, name, acc, resp, input_tokens=0, slot="", t0=None):
                     if fn.get("arguments"):
                         st["args"] += fn["arguments"]
                     if not st["opened"] and st["name"]:
+                        if think_open:
+                            yield ev("content_block_stop", {"type": "content_block_stop", "index": THINK_INDEX})
+                            think_open = False
                         if text_open:
                             yield ev("content_block_stop", {"type": "content_block_stop", "index": text_index})
                             text_open = False
@@ -311,6 +360,9 @@ def stream_events(ctx, name, acc, resp, input_tokens=0, slot="", t0=None):
                             "type": "content_block_delta", "index": st["block"],
                             "delta": {"type": "input_json_delta", "partial_json": fn["arguments"]}})
 
+        if think_open:
+            yield ev("content_block_stop", {"type": "content_block_stop", "index": THINK_INDEX})
+            think_open = False
         if text_open:
             yield ev("content_block_stop", {"type": "content_block_stop", "index": text_index})
         for idx in sorted(tool_state):
